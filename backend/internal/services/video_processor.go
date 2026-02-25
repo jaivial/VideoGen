@@ -118,6 +118,9 @@ func (vp *VideoProcessor) GenerateVideo(input CompositionInput) (string, error) 
 func (vp *VideoProcessor) generateCaptionBasedVideo(input CompositionInput, chunkDir string) ([]string, error) {
 	captionSegments := input.CaptionSegments
 
+	// Split caption segments into phrases of max 5 words each for better timing
+	captionSegments = splitIntoPhrases(captionSegments, 5)
+
 	// Get the unified audio path
 	audioPath := ""
 	if len(input.Audios) > 0 && len(input.Audios[0]) > 100 && !strings.Contains(string(input.Audios[0]), "PLACEHOLDER") {
@@ -215,7 +218,9 @@ func (vp *VideoProcessor) buildCaptionTimingFilter(captionSegments []CaptionSegm
 	var drawtextFilters []string
 
 	for _, caption := range captionSegments {
-		text := escapeDrawtextText(caption.Text)
+		// Wrap text for display
+		wrappedText := wrapText(caption.Text)
+		text := escapeDrawtextText(wrappedText)
 		startTime := caption.StartTime
 		endTime := caption.EndTime
 
@@ -461,6 +466,47 @@ func JSONToChunks(data string) ([]Chunk, error) {
 	var chunks []Chunk
 	err := json.Unmarshal([]byte(data), &chunks)
 	return chunks, err
+}
+
+// splitIntoPhrases splits Whisper caption segments into smaller phrases of max wordsPerPhrase
+// Each phrase gets calculated timing based on word duration from original segment
+func splitIntoPhrases(segments []CaptionSegment, wordsPerPhrase int) []CaptionSegment {
+	if wordsPerPhrase <= 0 {
+		wordsPerPhrase = 5 // Default to 5 words per phrase
+	}
+
+	var result []CaptionSegment
+	for _, seg := range segments {
+		words := strings.Fields(seg.Text)
+		if len(words) == 0 {
+			continue
+		}
+
+		// Calculate duration per word
+		wordCount := float64(len(words))
+		segmentDuration := seg.EndTime - seg.StartTime
+		if segmentDuration <= 0 {
+			segmentDuration = 3.0 // Default duration
+		}
+		wordDuration := segmentDuration / wordCount
+
+		// Split into phrases
+		for i := 0; i < len(words); i += wordsPerPhrase {
+			end := i + wordsPerPhrase
+			if end > len(words) {
+				end = len(words)
+			}
+			phrase := strings.Join(words[i:end], " ")
+
+			result = append(result, CaptionSegment{
+				Text:      phrase,
+				StartTime: seg.StartTime + float64(i)*wordDuration,
+				EndTime:   seg.StartTime + float64(end)*wordDuration,
+			})
+		}
+	}
+
+	return result
 }
 
 func copyFile(src, dst string) error {
