@@ -18,6 +18,54 @@ import (
 	"video-generator/internal/services"
 )
 
+// VideoLogger is a logger that writes to both stdout and a file
+type VideoLogger struct {
+	file *os.File
+}
+
+// NewVideoLogger creates a new logger for a specific video
+func NewVideoLogger(videoDir string, videoID uint64) (*VideoLogger, error) {
+	logPath := filepath.Join(videoDir, fmt.Sprintf("video_%d.log", videoID))
+	f, err := os.Create(logPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create log file: %w", err)
+	}
+	return &VideoLogger{file: f}, nil
+}
+
+// Write writes a message to both stdout and the file
+func (l *VideoLogger) Write(format string, args ...interface{}) {
+	msg := fmt.Sprintf(format, args...)
+	timestamp := time.Now().Format("2006-01-02 15:04:05")
+	fullMsg := fmt.Sprintf("[%s] %s\n", timestamp, msg)
+	fmt.Print(fullMsg)
+	l.file.WriteString(fullMsg)
+	l.file.Sync()
+}
+
+// Close closes the log file
+func (l *VideoLogger) Close() {
+	if l.file != nil {
+		l.file.Close()
+	}
+}
+
+// formatDuration formats duration in seconds to a readable string
+func formatDuration(seconds float64) string {
+	d := int(seconds)
+	minutes := d / 60
+	secs := d % 60
+	return fmt.Sprintf("%dm%ds", minutes, secs)
+}
+
+// truncate truncates a string to maxLen characters
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
+}
+
 // Broadcaster interface for WebSocket notifications
 type Broadcaster interface {
 	BroadcastPhase(videoID uint64, phase string, progress int, message string)
@@ -62,7 +110,7 @@ func NewVideoWorker(
 	}
 }
 
-func (w *VideoWorker) ProcessVideo(videoRequestID, userID uint64, videoURL, transcribedText, outputLang string) {
+func (w *VideoWorker) ProcessVideo(videoRequestID, userID uint64, videoURL, transcribedText, outputLang, voice, styleInstruction string) {
 	log.Printf("Starting video processing for request %d", videoRequestID)
 
 	// Create directories for this video
@@ -70,12 +118,31 @@ func (w *VideoWorker) ProcessVideo(videoRequestID, userID uint64, videoURL, tran
 	textsDir := filepath.Join(videoDir, "texts")
 	audiosDir := filepath.Join(videoDir, "audios")
 
+	// Create video logger for file logging
+	logger, err := NewVideoLogger(videoDir, videoRequestID)
+	if err != nil {
+		log.Printf("Warning: failed to create video logger: %v", err)
+	}
+	if logger != nil {
+		defer logger.Close()
+		logger.Write("=== Video Generation Started ===")
+		logger.Write("Video ID: %d, User ID: %d", videoRequestID, userID)
+		logger.Write("Video URL: %s", videoURL)
+		logger.Write("Output Language: %s", outputLang)
+	}
+
 	if err := os.MkdirAll(textsDir, 0755); err != nil {
 		w.handleError(videoRequestID, "setup", "create_dirs", fmt.Sprintf("Failed to create texts directory: %v", err))
+		if logger != nil {
+			logger.Write("ERROR: Failed to create texts directory: %v", err)
+		}
 		return
 	}
 	if err := os.MkdirAll(audiosDir, 0755); err != nil {
 		w.handleError(videoRequestID, "setup", "create_dirs", fmt.Sprintf("Failed to create audios directory: %v", err))
+		if logger != nil {
+			logger.Write("ERROR: Failed to create audios directory: %v", err)
+		}
 		return
 	}
 
@@ -119,6 +186,14 @@ func (w *VideoWorker) ProcessVideo(videoRequestID, userID uint64, videoURL, tran
 		}
 
 		w.broadcastStep(videoRequestID, "chunking", "chunking_complete", 20, fmt.Sprintf("Created %d segments", len(segments)))
+
+		// Log transcript details
+		if logger != nil {
+			logger.Write("Phase 1: Transcript parsed - %d segments created", len(segments))
+			for i, seg := range segments {
+				logger.Write("  Segment %d: [%s] %s", i, formatDuration(seg.Duration), truncate(seg.OriginalText, 50))
+			}
+		}
 	} else {
 		// Fetch transcript from YouTube
 		w.updatePhase(videoRequestID, "transcribing")
@@ -163,6 +238,26 @@ func (w *VideoWorker) ProcessVideo(videoRequestID, userID uint64, videoURL, tran
 		defer os.Remove(audioPath)
 	}
 
+	// Re-chunk transcription to 1800-char chunks ending with full stop
+	// This ensures the database stores properly chunked text, not tiny sentence fragments
+	if len(segments) > 0 {
+		unifiedText := services.GenerateUnifiedTranscriptText(segments)
+		if len(unifiedText) > 0 {
+			transcriptionChunks := services.ChunkText(unifiedText, 1800)
+			log.Printf("Re-chunked transcription into %d chunks (~1800 chars each)", len(transcriptionChunks))
+
+			// Rebuild segments with proper 1800-char chunks
+			var newSegments []services.TranscriptSegment
+			for i, chunk := range transcriptionChunks {
+				newSegments = append(newSegments, services.TranscriptSegment{
+					Index:        i,
+					OriginalText: chunk,
+				})
+			}
+			segments = newSegments
+		}
+	}
+
 	// Save transcription
 	// Convert segments to chunks for storage
 	chunksForDB := make([]services.Chunk, len(segments))
@@ -194,44 +289,90 @@ func (w *VideoWorker) ProcessVideo(videoRequestID, userID uint64, videoURL, tran
 	// Skip re-chunking phase - use parsed segments directly
 	w.broadcastStep(videoRequestID, "chunking", "chunking_complete", 30, fmt.Sprintf("Using %d segments", len(segments)))
 
-	// Phase 4: Translation - UNIFIED
+	// Phase 4: Translation - CHUNKED
 	w.updatePhase(videoRequestID, "translating")
-	w.broadcastStep(videoRequestID, "translating", "translating_start", 30, "Translating unified text")
+	w.broadcastStep(videoRequestID, "translating", "translating_start", 30, "Translating in chunks")
 
-	// Generate unified text from original segments (before translation)
+	// Generate unified text from original segments
+	// Note: segments are already re-chunked to 1800-char chunks in the chunking phase
 	unifiedText := services.GenerateUnifiedTranscriptText(segments)
 	if len(unifiedText) == 0 {
 		w.handleError(videoRequestID, "translating", "translating_unified", "No text to translate")
 		return
 	}
 
-	// Translate the unified text as ONE piece (better context and coherence)
-	translatedText, err := w.openRouter.TranslateUnifiedText(unifiedText, "en", outputLang)
-	if err != nil {
-		w.handleError(videoRequestID, "translating", "translating_unified", fmt.Sprintf("Failed to translate: %v", err))
+	// Segments are already 1800-char chunks from chunking phase
+	textChunks := make([]string, len(segments))
+	for i, seg := range segments {
+		textChunks[i] = seg.OriginalText
+	}
+	if len(textChunks) == 0 {
+		w.handleError(videoRequestID, "translating", "translating_chunk", "Failed to chunk text")
 		return
 	}
 
-	// Store translated text in each segment for image prompts
-	for i := range segments {
-		segments[i].TranslatedText = translatedText
+	log.Printf("Chunked transcript into %d text chunks for translation", len(textChunks))
+
+	// Translate each chunk individually
+	translatedChunks, err := w.openRouter.TranslateTexts(textChunks, "en", outputLang)
+	if err != nil {
+		w.handleError(videoRequestID, "translating", "translating_chunks", fmt.Sprintf("Failed to translate chunks: %v", err))
+		return
 	}
 
-	w.broadcastStep(videoRequestID, "translating", "translating_unified", 45, "Unified translation complete")
+	// Calculate total duration from original segments for timing
+	var totalOriginalDuration float64
+	for _, seg := range segments {
+		totalOriginalDuration += seg.Duration
+	}
 
-	// Save translated texts to files
-	originalTexts := make([]string, len(segments))
+	// Create new segments from translated chunks with proper timing
+	// Each translated chunk becomes a new segment
+	var translatedSegments []services.TranscriptSegment
+	var originalTexts []string
+
+	for i, translatedText := range translatedChunks {
+		// Calculate duration proportionally based on original text lengths
+		// Get original text for this chunk (approximate by counting chars)
+		chunkStartRatio := float64(i) / float64(len(translatedChunks))
+		chunkEndRatio := float64(i+1) / float64(len(translatedChunks))
+
+		// Estimate duration based on text length ratio
+		chunkDuration := (chunkEndRatio - chunkStartRatio) * totalOriginalDuration
+		if chunkDuration < 1.0 {
+			chunkDuration = 1.0 // Minimum 1 second
+		}
+
+		chunkStartTime := chunkStartRatio * totalOriginalDuration
+
+		seg := services.TranscriptSegment{
+			Index:           i,
+			OriginalText:    textChunks[i],
+			TranslatedText:  translatedText,
+			StartTime:       chunkStartTime,
+			Duration:        chunkDuration,
+		}
+		translatedSegments = append(translatedSegments, seg)
+		originalTexts = append(originalTexts, textChunks[i])
+	}
+
+	log.Printf("Created %d translated segments with proper timing", len(translatedSegments))
+
+	// Update segments with translated content
+	segments = translatedSegments
+
+	// Save translated texts to files (each chunk gets its own file with unique content)
 	translatedTexts := make([]string, len(segments))
 	for i, seg := range segments {
-		originalTexts[i] = seg.OriginalText
 		translatedTexts[i] = seg.TranslatedText
 
-		// Save translated text to file
-		textPath := filepath.Join(textsDir, fmt.Sprintf("chunk_%d.txt", i))
+		// Save translated text to file - each chunk has DIFFERENT content now
+		textPath := filepath.Join(textsDir, fmt.Sprintf("%d_chunk_%d.txt", videoRequestID, i))
 		if err := os.WriteFile(textPath, []byte(seg.TranslatedText), 0644); err != nil {
 			w.handleError(videoRequestID, "translating", "save_text", fmt.Sprintf("Failed to save translated text: %v", err))
 			return
 		}
+		log.Printf("Saved chunk %d to file: %d chars", i, len(seg.TranslatedText))
 	}
 
 	// Save translations to database
@@ -248,8 +389,8 @@ func (w *VideoWorker) ProcessVideo(videoRequestID, userID uint64, videoURL, tran
 		return
 	}
 
-	w.broadcastStep(videoRequestID, "translating", "translating_save", 45, "Translations saved")
-	w.broadcastStep(videoRequestID, "translating", "translating_complete", 50, "Translation complete")
+	w.broadcastStep(videoRequestID, "translating", "translating_save", 45, fmt.Sprintf("Saved %d translated chunks", len(translatedSegments)))
+	w.broadcastStep(videoRequestID, "translating", "translating_complete", 50, fmt.Sprintf("Translation complete: %d unique chunks", len(translatedSegments)))
 
 	// Phase 5: Generate assets (images + audio)
 	w.updatePhase(videoRequestID, "generating_assets")
@@ -282,15 +423,31 @@ func (w *VideoWorker) ProcessVideo(videoRequestID, userID uint64, videoURL, tran
 	var imageGenErr, audioGenErr error
 
 	// Narrator voice description
-	// Use consistent voice profile for deterministic TTS output
-	narratorVoice := services.ConsistentVoice
+	// Use voice and style instruction from request, or defaults
+	// Keep voice and styleInstruction separate for the TTS API
+	narratorVoice := voice
+	narratorStyle := styleInstruction
+
+	// Log the voice settings
+	if logger != nil {
+		logger.Write("Voice: %s, Style: %s", narratorVoice, truncate(narratorStyle, 50))
+	}
+
+	// Capture logger for goroutines
+	videoLogger := logger
 
 	// Parallel image generation
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		w.broadcastStep(videoRequestID, "generating_assets", "generating_images", 55, "Generating images in parallel")
+		if videoLogger != nil {
+			videoLogger.Write("Phase 5: Starting image generation - %d image groups", len(imageGroups))
+		}
 		imageGroups, imageGenErr = w.waveSpeed.GenerateImagesParallel(imageGroups, videoDir, w.broadcaster, videoRequestID)
+		if videoLogger != nil && imageGenErr != nil {
+			videoLogger.Write("ERROR: Image generation failed: %v", imageGenErr)
+		}
 	}()
 
 	// Unified audio generation (single TTS call)
@@ -298,6 +455,9 @@ func (w *VideoWorker) ProcessVideo(videoRequestID, userID uint64, videoURL, tran
 	go func() {
 		defer wg.Done()
 		w.broadcastStep(videoRequestID, "generating_assets", "assets_audio", 55, "Generating unified audio")
+		if videoLogger != nil {
+			videoLogger.Write("Phase 5: Starting audio generation")
+		}
 
 		// Step 1: Generate unified text from all segments
 		unifiedText := services.GenerateUnifiedTranscriptText(segments)
@@ -306,11 +466,23 @@ func (w *VideoWorker) ProcessVideo(videoRequestID, userID uint64, videoURL, tran
 			return
 		}
 
-		// Step 2: Generate single audio from unified text
-		audioURL, err := w.waveSpeed.GenerateUnifiedSpeech(unifiedText, narratorVoice)
+		// Step 2: Generate single audio from unified text (background, no timeout)
+		// Log the text that will be sent to TTS
+		if logger != nil {
+			logger.Write("Phase 5: Generating audio - text length: %d chars", len(unifiedText))
+			logger.Write("  Unified text preview: %s...", truncate(unifiedText, 100))
+			logger.Write("  Using voice: %s, style: %s", narratorVoice, truncate(narratorStyle, 50))
+		}
+		audioURL, err := w.waveSpeed.GenerateUnifiedSpeechBackgroundWithVoice(unifiedText, narratorVoice, narratorStyle, outputLang)
 		if err != nil {
 			audioGenErr = fmt.Errorf("failed to generate unified speech: %w", err)
+			if logger != nil {
+				logger.Write("ERROR: Failed to generate unified speech: %v", err)
+			}
 			return
+		}
+		if logger != nil {
+			logger.Write("Audio generated successfully, URL: %s", truncate(audioURL, 80))
 		}
 
 		// Step 3: Download audio to file
@@ -320,7 +492,7 @@ func (w *VideoWorker) ProcessVideo(videoRequestID, userID uint64, videoURL, tran
 			return
 		}
 
-		audioPath := filepath.Join(audiosDir, "unified.wav")
+		audioPath := filepath.Join(audiosDir, fmt.Sprintf("%d_unified.wav", videoRequestID))
 		if err := os.WriteFile(audioPath, audioData, 0644); err != nil {
 			audioGenErr = fmt.Errorf("failed to save unified audio: %w", err)
 			return
@@ -478,7 +650,15 @@ func (w *VideoWorker) ProcessVideo(videoRequestID, userID uint64, videoURL, tran
 	w.updatePhase(videoRequestID, "composing")
 	w.broadcastStep(videoRequestID, "composing", "composing_start", 75, "Composing video with kinetic captions")
 
+	if logger != nil {
+		logger.Write("Phase 6: Starting video composition")
+		logger.Write("  Chunks: %d, Images: %d", len(chunks), len(imageGroups))
+		logger.Write("  Audio duration: %.1fs", captionInfo.AudioDuration)
+		logger.Write("  Caption segments: %d", len(captionInfo.CaptionSegments))
+	}
+
 	input := services.CompositionInput{
+		VideoID:         videoRequestID,
 		Chunks:          chunks,
 		ImageGroups:     imageGroups,
 		Images:          imagePaths, // Use local paths for FFmpeg
@@ -490,7 +670,13 @@ func (w *VideoWorker) ProcessVideo(videoRequestID, userID uint64, videoURL, tran
 	outputPath, err := w.videoProcessor.GenerateVideo(input)
 	if err != nil {
 		w.handleError(videoRequestID, "composing", "composing_video", fmt.Sprintf("Failed to compose video: %v", err))
+		if logger != nil {
+			logger.Write("ERROR: Video composition failed: %v", err)
+		}
 		return
+	}
+	if logger != nil {
+		logger.Write("Video composition completed: %s", outputPath)
 	}
 	defer os.Remove(outputPath)
 
@@ -548,6 +734,10 @@ func (w *VideoWorker) ProcessVideo(videoRequestID, userID uint64, videoURL, tran
 	// Broadcast completion
 	w.broadcast(videoRequestID, "completed", 100, "Video generation complete!")
 
+	if logger != nil {
+		logger.Write("=== Video Generation Completed Successfully ===")
+		logger.Write("Output URL: %s", uploadURL)
+	}
 	log.Printf("Video processing complete for request %d", videoRequestID)
 }
 
