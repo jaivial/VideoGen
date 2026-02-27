@@ -1,0 +1,16 @@
+FROM alpine:3.20
+
+RUN apk add --no-cache ffmpeg yt-dlp ca-certificates nodejs npm
+
+WORKDIR /app
+
+# Copy pre-built binary
+COPY bin/server ./server
+
+# Copy package files
+COPY package.json package-lock.json* ./
+RUN if [ -f package-lock.json ]; then npm ci --production; else npm install --production; fi
+
+EXPOSE 8080
+
+CMD ["./server"]

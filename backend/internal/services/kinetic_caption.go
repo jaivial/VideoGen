@@ -10,7 +10,10 @@ const HorizontalPadding = 100
 
 // MaxCharsPerLine defines maximum characters per line for text wrapping
 // At 72pt DejaVu Sans, roughly 10 chars per 100px, so ~82 chars per line with padding
-const MaxCharsPerLine = 40
+const MaxCharsPerLine = 35
+
+// MaxLines defines maximum number of lines per caption
+const MaxLines = 3
 
 // KineticCaptionConfig holds styling configuration for kinetic captions
 type KineticCaptionConfig struct {
@@ -29,7 +32,7 @@ type KineticCaptionConfig struct {
 func DefaultKineticConfig() KineticCaptionConfig {
 	return KineticCaptionConfig{
 		FontFile:    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-		FontSize:    72,
+		FontSize:    90,
 		FontColor:   "white",
 		BorderWidth: 3,
 		BorderColor: "black",
@@ -174,7 +177,7 @@ func GenerateSimpleKineticFilter(chunk Chunk, config KineticCaptionConfig) strin
 	)
 }
 
-// wrapText wraps text into multiple lines based on MaxCharsPerLine
+// wrapText wraps text into multiple lines based on MaxCharsPerLine and MaxLines
 func wrapText(text string) string {
 	words := strings.Fields(text)
 	if len(words) == 0 {
@@ -185,16 +188,38 @@ func wrapText(text string) string {
 	var currentLine strings.Builder
 
 	for _, word := range words {
+		// Handle words longer than MaxCharsPerLine by splitting them
+		if len(word) > MaxCharsPerLine {
+			// If there's content in currentLine, save it first
+			if currentLine.Len() > 0 {
+				lines = append(lines, currentLine.String())
+				currentLine.Reset()
+			}
+			// Split long word into chunks
+			for len(word) > MaxCharsPerLine {
+				lines = append(lines, word[:MaxCharsPerLine])
+				word = word[MaxCharsPerLine:]
+			}
+			// Add remaining part
+			currentLine.WriteString(word)
+			continue
+		}
+
 		if currentLine.Len()+len(word)+1 > MaxCharsPerLine && currentLine.Len() > 0 {
 			lines = append(lines, currentLine.String())
 			currentLine.Reset()
+
+			// Check if we've reached max lines
+			if len(lines) >= MaxLines {
+				break
+			}
 		}
 		if currentLine.Len() > 0 {
 			currentLine.WriteString(" ")
 		}
 		currentLine.WriteString(word)
 	}
-	if currentLine.Len() > 0 {
+	if currentLine.Len() > 0 && len(lines) < MaxLines {
 		lines = append(lines, currentLine.String())
 	}
 
@@ -211,12 +236,23 @@ func countLines(text string) int {
 
 // escapeDrawtextText escapes special characters for FFmpeg drawtext
 func escapeDrawtextText(text string) string {
-	// Escape single quotes
+	// FFmpeg drawtext supports actual newlines when escaped properly
+	// First convert actual newlines to \n escape sequence for FFmpeg
+	// (do this BEFORE escaping backslashes to avoid double-escaping)
+	text = strings.ReplaceAll(text, "\n", "\\n")
+	text = strings.ReplaceAll(text, "\r", "")
+
+	// Then escape single quotes
 	text = strings.ReplaceAll(text, "'", "\\'")
-	// Escape colons (special in drawtext)
+	// Then escape colons (special in drawtext)
 	text = strings.ReplaceAll(text, ":", "\\:")
-	// Escape backslashes
+	// Finally escape any remaining backslashes (but not the \n we just added)
+	// We need to be careful not to double-escape the \n sequences
+	// Use a temporary placeholder for \n, escape, then restore
+	text = strings.ReplaceAll(text, "\\n", "\x00TEMP_NEWLINE\x00")
 	text = strings.ReplaceAll(text, "\\", "\\\\")
+	text = strings.ReplaceAll(text, "\x00TEMP_NEWLINE\x00", "\\n")
+
 	return text
 }
 

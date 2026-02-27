@@ -1,0 +1,79 @@
+version: '3.8'
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: video-generator-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpassword}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-video_generator}
+      MYSQL_USER: ${MYSQL_USER:-video_user}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-video_pass}
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    networks:
+      - video-generator-net
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: video-generator-backend
+    environment:
+      - DB_HOST=host.docker.internal
+      - DB_PORT=3306
+      - DB_USER=video_user
+      - DB_PASSWORD=video_pass
+      - DB_NAME=video_generator
+      - JWT_SECRET=${JWT_SECRET:-your-secret-key-change-in-production}
+      - WAVESPEED_API_KEY=${WAVESPEED_API_KEY}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - BUNNY_STORAGE_NAME=${BUNNY_STORAGE_NAME}
+      - BUNNY_STORAGE_PASSWORD=${BUNNY_STORAGE_PASSWORD}
+      - BUNNY_STORAGE_HOST=${BUNNY_STORAGE_HOST}
+      - BUNNY_CDN_HOST=${BUNNY_CDN_HOST}
+      - SMTP_HOST=${SMTP_HOST}
+      - SMTP_PORT=${SMTP_PORT}
+      - SMTP_USER=${SMTP_USER}
+      - SMTP_PASS=${SMTP_PASS}
+      - SMTP_FROM=${SMTP_FROM}
+    ports:
+      - "8080:8080"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - video-generator-net
+    volumes:
+      - ./backend:/app
+      - video_temp:/tmp/video_generator
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: video-generator-frontend
+    environment:
+      - VITE_API_URL=http://backend:8080
+      - VITE_WS_URL=ws://backend:8080
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    networks:
+      - video-generator-net
+
+volumes:
+  mysql_data:
+  video_temp:
+
+networks:
+  video-generator-net:
+    driver: bridge

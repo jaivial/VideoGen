@@ -27,11 +27,12 @@ type Chunk struct {
 }
 
 type CompositionInput struct {
-	Chunks         []Chunk
-	ImageGroups    []ImageGroup // Groups of chunks that share the same image
-	Images         []string     // Individual images (one per chunk) - for backward compatibility
-	Audios         [][]byte
-	OutputLang     string
+	VideoID         uint64
+	Chunks          []Chunk
+	ImageGroups     []ImageGroup // Groups of chunks that share the same image
+	Images          []string     // Individual images (one per chunk) - for backward compatibility
+	Audios          [][]byte
+	OutputLang      string
 	CaptionSegments []CaptionSegment // Whisper caption segments for precise timing
 }
 
@@ -43,10 +44,16 @@ func NewVideoProcessor(tempDir string, cfg *config.Config) *VideoProcessor {
 }
 
 func (vp *VideoProcessor) GenerateVideo(input CompositionInput) (string, error) {
-	outputFile := filepath.Join(vp.tempDir, fmt.Sprintf("output_%d.mp4", time.Now().Unix()))
+	// Create video-specific working directory
+	videoWorkDir := filepath.Join(vp.tempDir, fmt.Sprintf("%d", input.VideoID), "processing")
+	if err := os.MkdirAll(videoWorkDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create video work dir: %w", err)
+	}
 
-	// Create temp directory for chunks
-	chunkDir := filepath.Join(vp.tempDir, "chunks")
+	outputFile := filepath.Join(videoWorkDir, fmt.Sprintf("output_%d.mp4", time.Now().Unix()))
+
+	// Create temp directory for chunks in video-specific directory
+	chunkDir := filepath.Join(videoWorkDir, "chunks")
 	if err := os.MkdirAll(chunkDir, 0755); err != nil {
 		return "", fmt.Errorf("failed to create chunk dir: %w", err)
 	}
@@ -66,14 +73,22 @@ func (vp *VideoProcessor) GenerateVideo(input CompositionInput) (string, error) 
 	}
 
 	// Determine if we should use caption-based timing
-	useCaptionTiming := len(input.CaptionSegments) > 0 && len(input.Chunks) > 0
+	// Only use caption timing if we have valid non-empty caption segments
+	hasValidCaptions := false
+	for _, cs := range input.CaptionSegments {
+		if cs.Text != "" && cs.EndTime > cs.StartTime {
+			hasValidCaptions = true
+			break
+		}
+	}
+	useCaptionTiming := hasValidCaptions && len(input.Chunks) > 0
 
 	var segmentFiles []string
 
 	if useCaptionTiming {
 		// Use Whisper caption segments for precise timing
 		// Each caption segment becomes a video segment with its own timing
-		segmentFiles, err := vp.generateCaptionBasedVideo(input, chunkDir)
+		segmentFiles, err := vp.generateCaptionBasedVideo(input, chunkDir, videoWorkDir)
 		if err != nil {
 			return "", fmt.Errorf("failed to generate caption-based video: %w", err)
 		}
@@ -94,11 +109,11 @@ func (vp *VideoProcessor) GenerateVideo(input CompositionInput) (string, error) 
 		imgPath := imagePaths[i]
 		if imgPath == "" {
 			// Generate placeholder if no image available
-			imgPath = filepath.Join(vp.tempDir, "placeholder.png")
+			imgPath = filepath.Join(videoWorkDir, "placeholder.png")
 		}
 
 		// Generate video for this chunk with kinetic captions
-		if err := vp.generateChunkVideo(chunk, imgPath, input.Audios[i], chunkFile); err != nil {
+		if err := vp.generateChunkVideo(chunk, imgPath, input.Audios[i], chunkFile, videoWorkDir); err != nil {
 			return "", fmt.Errorf("failed to generate chunk %d: %w", i, err)
 		}
 
@@ -115,16 +130,19 @@ func (vp *VideoProcessor) GenerateVideo(input CompositionInput) (string, error) 
 
 // generateCaptionBasedVideo generates video based on Whisper caption timestamps
 // Creates a single video with caption overlays at precise timestamps
-func (vp *VideoProcessor) generateCaptionBasedVideo(input CompositionInput, chunkDir string) ([]string, error) {
+func (vp *VideoProcessor) generateCaptionBasedVideo(input CompositionInput, chunkDir, videoWorkDir string) ([]string, error) {
 	captionSegments := input.CaptionSegments
+	log.Printf("[VideoProcessor] Original caption segments: %d", len(captionSegments))
 
-	// Split caption segments into phrases of max 5 words each for better timing
-	captionSegments = splitIntoPhrases(captionSegments, 5)
+	// Split caption segments into phrases of max 4 words each for better timing
+	originalCount := len(captionSegments)
+	captionSegments = splitIntoPhrases(captionSegments, 4)
+	log.Printf("[VideoProcessor] Split into %d phrases (was %d segments)", len(captionSegments), originalCount)
 
 	// Get the unified audio path
 	audioPath := ""
 	if len(input.Audios) > 0 && len(input.Audios[0]) > 100 && !strings.Contains(string(input.Audios[0]), "PLACEHOLDER") {
-		audioPath = filepath.Join(vp.tempDir, "unified_audio.wav")
+		audioPath = filepath.Join(videoWorkDir, "unified_audio.wav")
 		if err := os.WriteFile(audioPath, input.Audios[0], 0644); err != nil {
 			log.Printf("Warning: failed to write unified audio: %v", err)
 			audioPath = ""
@@ -137,9 +155,9 @@ func (vp *VideoProcessor) generateCaptionBasedVideo(input CompositionInput, chun
 		imagePath = input.Images[0]
 	}
 	if imagePath == "" {
-		imagePath = filepath.Join(vp.tempDir, "placeholder.png")
+		imagePath = filepath.Join(videoWorkDir, "placeholder.png")
 	} else if _, err := os.Stat(imagePath); err != nil {
-		imagePath = filepath.Join(vp.tempDir, "placeholder.png")
+		imagePath = filepath.Join(videoWorkDir, "placeholder.png")
 	}
 	// Generate placeholder if needed
 	if _, err := os.Stat(imagePath); os.IsNotExist(err) {
@@ -152,7 +170,7 @@ func (vp *VideoProcessor) generateCaptionBasedVideo(input CompositionInput, chun
 	// Generate single video with caption timing overlays
 	outputFile := filepath.Join(chunkDir, "caption_video.mp4")
 
-	if err := vp.generateVideoWithCaptionTiming(imagePath, audioPath, captionSegments, outputFile); err != nil {
+	if err := vp.generateVideoWithCaptionTiming(imagePath, audioPath, captionSegments, outputFile, videoWorkDir); err != nil {
 		return nil, fmt.Errorf("failed to generate video with caption timing: %w", err)
 	}
 
@@ -165,7 +183,8 @@ func (vp *VideoProcessor) generateCaptionBasedVideo(input CompositionInput, chun
 }
 
 // generateVideoWithCaptionTiming creates a video with multiple caption overlays at precise timestamps
-func (vp *VideoProcessor) generateVideoWithCaptionTiming(imagePath, audioPath string, captionSegments []CaptionSegment, outputFile string) error {
+// Uses ASS subtitle format for automatic text wrapping and styling
+func (vp *VideoProcessor) generateVideoWithCaptionTiming(imagePath, audioPath string, captionSegments []CaptionSegment, outputFile, videoWorkDir string) error {
 	// Handle audio
 	audioInputPath := audioPath
 	if audioInputPath != "" {
@@ -175,7 +194,7 @@ func (vp *VideoProcessor) generateVideoWithCaptionTiming(imagePath, audioPath st
 	}
 	if audioInputPath == "" {
 		// Generate silent audio as fallback
-		silentPath := filepath.Join(vp.tempDir, "silent_audio.mp3")
+		silentPath := filepath.Join(videoWorkDir, "silent_audio.mp3")
 		silentCmd := exec.Command("ffmpeg", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono", "-t", "10", "-y", silentPath)
 		if silentOut, silentErr := silentCmd.CombinedOutput(); silentErr != nil {
 			return fmt.Errorf("failed to generate silent audio: %w\noutput: %s", silentErr, string(silentOut))
@@ -184,15 +203,31 @@ func (vp *VideoProcessor) generateVideoWithCaptionTiming(imagePath, audioPath st
 		defer os.Remove(silentPath)
 	}
 
-	// Build complex filter for multiple caption overlays
-	filterComplex := vp.buildCaptionTimingFilter(captionSegments)
+	// Generate ASS subtitle file
+	var filterComplex string
+	if len(captionSegments) > 0 {
+		assPath := filepath.Join(videoWorkDir, "captions.ass")
+		config := DefaultKineticConfig()
+
+		// Generate ASS file with auto-wrapping and fade animations
+		if err := GenerateASSFile(captionSegments, config, assPath, 1920, 1080); err != nil {
+			return fmt.Errorf("failed to generate ASS file: %w", err)
+		}
+
+		// Use simple ASS filter instead of complex drawtext chain
+		// scale first, then apply ASS subtitles
+		// Wrap path in quotes to handle special characters
+		filterComplex = fmt.Sprintf("scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1,ass='%s'", assPath)
+	} else {
+		filterComplex = "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1"
+	}
 
 	// FFmpeg command
 	ffmpegCmd := exec.Command("ffmpeg",
 		"-loop", "1",
 		"-i", imagePath,
 		"-i", audioInputPath,
-		"-vf", fmt.Sprintf("scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1,%s", filterComplex),
+		"-vf", filterComplex,
 		"-c:v", "libx264",
 		"-preset", "fast",
 		"-crf", "23",
@@ -208,57 +243,6 @@ func (vp *VideoProcessor) generateVideoWithCaptionTiming(imagePath, audioPath st
 	}
 
 	return nil
-}
-
-// buildCaptionTimingFilter builds an FFmpeg filter for multiple caption overlays at precise times
-func (vp *VideoProcessor) buildCaptionTimingFilter(captionSegments []CaptionSegment) string {
-	config := DefaultKineticConfig()
-	xPos, yPos := getPositionCoords(config.Position, config.YOffset)
-
-	var drawtextFilters []string
-
-	for _, caption := range captionSegments {
-		// Wrap text for display
-		wrappedText := wrapText(caption.Text)
-		text := escapeDrawtextText(wrappedText)
-		startTime := caption.StartTime
-		endTime := caption.EndTime
-
-		if endTime <= startTime {
-			endTime = startTime + 3.0 // Default 3 second display
-		}
-
-		// Calculate animation timing
-		animIn := config.AnimationIn
-		animOut := config.AnimationOut
-		holdStart := startTime + animIn
-		holdEnd := endTime - animOut
-
-		// Build enable expression for this caption
-		// Show caption between startTime and endTime with fade in/out
-		enableExpr := fmt.Sprintf(
-			"between(t,%f,%f)",
-			startTime, endTime,
-		)
-
-		// Alpha expression for fade in/out within the display window
-		alphaExpr := fmt.Sprintf(
-			"if(lt(t,%f),0,if(lt(t,%f),%f/(t-%f),if(lt(t,%f),1,if(lt(t,%f),1-(t-%f)/%f,0))))",
-			startTime + animIn,
-			holdStart, animIn, startTime,
-			holdEnd, endTime, holdEnd, animOut,
-		)
-
-		filter := fmt.Sprintf(
-			"drawtext=fontfile='%s':text='%s':fontcolor=%s:fontsize=%d:borderw=%d:bordercolor=%s:x=%s:y=%s:enable='%s':alpha=%s",
-			config.FontFile, text, config.FontColor, config.FontSize, config.BorderWidth, config.BorderColor,
-			xPos, yPos, enableExpr, alphaExpr,
-		)
-
-		drawtextFilters = append(drawtextFilters, filter)
-	}
-
-	return strings.Join(drawtextFilters, ",")
 }
 
 // concatenateSegments concatenates multiple video segments into one
@@ -290,11 +274,11 @@ func (vp *VideoProcessor) concatenateSegments(segmentFiles []string, outputFile,
 	return outputFile, nil
 }
 
-func (vp *VideoProcessor) generateChunkVideo(chunk Chunk, imagePath string, audioData []byte, outputFile string) error {
+func (vp *VideoProcessor) generateChunkVideo(chunk Chunk, imagePath string, audioData []byte, outputFile, videoWorkDir string) error {
 	// Check if image file exists, if not generate a placeholder
 	if _, err := os.Stat(imagePath); os.IsNotExist(err) {
 		log.Printf("Image not found at %s, generating placeholder", imagePath)
-		placeholderPath := filepath.Join(vp.tempDir, "placeholder.png")
+		placeholderPath := filepath.Join(videoWorkDir, "placeholder.png")
 		if _, err := os.Stat(placeholderPath); os.IsNotExist(err) {
 			// Create a simple solid color placeholder using ffmpeg
 			genCmd := exec.Command("ffmpeg", "-f", "lavfi", "-i", "color=c=blue:s=1920x1080:d=1", "-frames:v", "1", "-y", placeholderPath)
@@ -308,7 +292,7 @@ func (vp *VideoProcessor) generateChunkVideo(chunk Chunk, imagePath string, audi
 	}
 
 	// Save audio - if placeholder or too small, generate silent audio
-	audioPath := filepath.Join(vp.tempDir, "temp_audio.mp3")
+	audioPath := filepath.Join(videoWorkDir, "temp_audio.mp3")
 	audioLen := len(audioData)
 	if audioLen < 100 || strings.Contains(string(audioData), "PLACEHOLDER") {
 		// Generate silent audio with duration matching chunk
@@ -468,11 +452,12 @@ func JSONToChunks(data string) ([]Chunk, error) {
 	return chunks, err
 }
 
-// splitIntoPhrases splits Whisper caption segments into smaller phrases of max wordsPerPhrase
-// Each phrase gets calculated timing based on word duration from original segment
+// splitIntoPhrases splits Whisper caption segments into 4-word chunks displayed in a column
+// Keeps original Whisper timing (no duration split)
+// All chunks for a segment are displayed together during the original phrase duration
 func splitIntoPhrases(segments []CaptionSegment, wordsPerPhrase int) []CaptionSegment {
 	if wordsPerPhrase <= 0 {
-		wordsPerPhrase = 5 // Default to 5 words per phrase
+		wordsPerPhrase = 4 // Default to 4 words per phrase
 	}
 
 	var result []CaptionSegment
@@ -482,28 +467,35 @@ func splitIntoPhrases(segments []CaptionSegment, wordsPerPhrase int) []CaptionSe
 			continue
 		}
 
-		// Calculate duration per word
-		wordCount := float64(len(words))
-		segmentDuration := seg.EndTime - seg.StartTime
-		if segmentDuration <= 0 {
-			segmentDuration = 3.0 // Default duration
-		}
-		wordDuration := segmentDuration / wordCount
+		// Keep original timing from Whisper
+		startTime := seg.StartTime
+		endTime := seg.EndTime
 
-		// Split into phrases
+		// If no timing, use default
+		if endTime <= startTime {
+			endTime = startTime + 3.0
+		}
+
+		// Split into 4-word chunks
+		var chunks []string
 		for i := 0; i < len(words); i += wordsPerPhrase {
 			end := i + wordsPerPhrase
 			if end > len(words) {
 				end = len(words)
 			}
-			phrase := strings.Join(words[i:end], " ")
-
-			result = append(result, CaptionSegment{
-				Text:      phrase,
-				StartTime: seg.StartTime + float64(i)*wordDuration,
-				EndTime:   seg.StartTime + float64(end)*wordDuration,
-			})
+			chunk := strings.Join(words[i:end], " ")
+			chunks = append(chunks, chunk)
 		}
+
+		// Combine all chunks with newlines for vertical column display
+		// Keep original Whisper timing for the entire phrase
+		columnText := strings.Join(chunks, "\n")
+
+		result = append(result, CaptionSegment{
+			Text:      columnText,
+			StartTime: startTime,
+			EndTime:   endTime,
+		})
 	}
 
 	return result

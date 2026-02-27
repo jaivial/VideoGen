@@ -21,7 +21,8 @@ import (
 
 type WaveSpeedService struct {
 	cfg    *config.Config
-	client *http.Client
+	client        *http.Client
+	clientNoTimeout *http.Client // For long-running operations like TTS
 }
 
 type WaveSpeedImageRequest struct {
@@ -35,6 +36,13 @@ type WaveSpeedImageRequest struct {
 }
 
 type WaveSpeedImageResponseWrapper struct {
+	// New flat format fields
+	ID      string   `json:"id"`
+	Status  string   `json:"status"`
+	Outputs []string `json:"outputs"`
+	Error   string   `json:"error"`
+
+	// Old wrapped format fields
 	Code    int    `json:"code"`
 	Message string `json:"message"`
 	Data    struct {
@@ -45,10 +53,45 @@ type WaveSpeedImageResponseWrapper struct {
 	} `json:"data"`
 }
 
+// GetStatus returns the status from either format
+func (r *WaveSpeedImageResponseWrapper) GetStatus() string {
+	if r.Status != "" {
+		return r.Status
+	}
+	return r.Data.Status
+}
+
+// GetOutputs returns the outputs from either format
+func (r *WaveSpeedImageResponseWrapper) GetOutputs() []string {
+	if len(r.Outputs) > 0 {
+		return r.Outputs
+	}
+	return r.Data.Outputs
+}
+
+// GetError returns the error from either format
+func (r *WaveSpeedImageResponseWrapper) GetError() string {
+	if r.Error != "" {
+		return r.Error
+	}
+	return r.Data.Error
+}
+
+// GetID returns the ID from either format
+func (r *WaveSpeedImageResponseWrapper) GetID() string {
+	if r.ID != "" {
+		return r.ID
+	}
+	return r.Data.ID
+}
+
 func NewWaveSpeedService(cfg *config.Config) *WaveSpeedService {
 	return &WaveSpeedService{
 		cfg:    cfg,
 		client: &http.Client{},
+		clientNoTimeout: &http.Client{
+			Timeout: 0, // No timeout for long-running background operations
+		},
 	}
 }
 
@@ -97,12 +140,16 @@ func (s *WaveSpeedService) GenerateImage(prompt string) (string, error) {
 		return "", fmt.Errorf("failed to decode response: %w", err)
 	}
 
-	// Check for API error
-	if result.Code != 200 {
+	// Check for API error (support both old wrapped format and new flat format)
+	if result.Code != 200 && result.Code != 0 {
 		return "", fmt.Errorf("wavespeed image API error: %s", result.Message)
 	}
 
-	taskID := result.Data.ID
+	// Get task ID - support both old wrapped format and new flat format
+	taskID := result.GetID()
+	if taskID == "" {
+		return "", fmt.Errorf("wavespeed image API error: no task ID returned")
+	}
 
 	// Poll for completion
 	return s.pollImageResult(taskID)
@@ -141,12 +188,17 @@ func (s *WaveSpeedService) pollImageResult(taskID string) (string, error) {
 		}
 		resp.Body.Close()
 
-		if result.Data.Status == "completed" && len(result.Data.Outputs) > 0 {
-			return result.Data.Outputs[0], nil
+		// Use helper methods to support both old and new response formats
+		status := result.GetStatus()
+		outputs := result.GetOutputs()
+		errMsg := result.GetError()
+
+		if status == "completed" && len(outputs) > 0 {
+			return outputs[0], nil
 		}
 
-		if result.Data.Status == "failed" {
-			return "", fmt.Errorf("wavespeed image generation failed: %s", result.Data.Error)
+		if status == "failed" {
+			return "", fmt.Errorf("wavespeed image generation failed: %s", errMsg)
 		}
 
 		// Wait before next poll (longer for images)
@@ -235,8 +287,8 @@ func (s *WaveSpeedService) GenerateImagesParallel(
 				return
 			}
 
-			// Save image to file with chunk range naming (e.g., group_0-9.jpg)
-			imagePath := filepath.Join(imagesDir, fmt.Sprintf("group_%d-%d.jpg", imageGroups[index].ChunkStart, imageGroups[index].ChunkEnd-1))
+			// Save image to file with chunk range naming (e.g., {videoID}_group_0-9.jpg)
+			imagePath := filepath.Join(imagesDir, fmt.Sprintf("%d_group_%d-%d.jpg", videoID, imageGroups[index].ChunkStart, imageGroups[index].ChunkEnd-1))
 			if err := os.WriteFile(imagePath, imageData, 0644); err != nil {
 				mu.Lock()
 				log.Printf("Failed to save image for group %d: %v", index, err)
@@ -296,17 +348,59 @@ func (s *WaveSpeedService) downloadImage(imageURL string) ([]byte, error) {
 	return io.ReadAll(resp.Body)
 }
 
-// WaveSpeed TTS types for Qwen3 TTS Voice Design
+// WaveSpeed TTS types for Qwen3 TTS Text-to-Speech
+// Supports both old format (with data wrapper) and new flat format
+
 type WaveSpeedTTSRequest struct {
-	Model            string `json:"model"`
-	Text             string `json:"text"`
-	VoiceDescription string `json:"voice_description"`
-	Language         string `json:"language"`
-	EnableSyncMode   bool   `json:"enable_sync_mode"`
+	Text            string `json:"text"`
+	Language        string `json:"language"`
+	Voice           string `json:"voice"`
+	StyleInstruction string `json:"style_instruction"`
 }
 
-// WaveSpeedTTSResponseWrapper wraps the API response
+// Available voices for Qwen3 TTS
+var Qwen3Voices = []string{"Vivian", "Serena", "Ono_Anna", "Sohee", "Uncle_Fu", "Dylan", "Eric", "Ryan", "Aiden"}
+
+// DefaultVoice is the default voice to use
+const DefaultVoice = "Vivian"
+
+// DefaultStyleInstruction is the default style for narration
+const DefaultStyleInstruction = "A clear, professional narrator voice. Moderate pace, storytelling style, perfect for educational content. Consistent tone and rhythm throughout."
+
+// Language code to full name mapping for WaveSpeed TTS API
+var languageCodeToName = map[string]string{
+	"auto": "auto",
+	"en":   "English",
+	"zh":   "Chinese",
+	"de":   "German",
+	"it":   "Italian",
+	"pt":   "Portuguese",
+	"es":   "Spanish",
+	"ja":   "Japanese",
+	"ko":   "Korean",
+	"fr":   "French",
+	"ru":   "Russian",
+}
+
+// getLanguageName converts language code to full name for WaveSpeed TTS
+func getLanguageName(code string) string {
+	if name, ok := languageCodeToName[code]; ok {
+		return name
+	}
+	return "auto" // Default to auto if not found
+}
+
+// WaveSpeedTTSResponseWrapper supports both response formats:
+// - New flat format: {id, status, outputs, error}
+// - Old wrapped format: {code, message, data: {id, status, outputs, error}}
 type WaveSpeedTTSResponseWrapper struct {
+	// New flat format fields
+	ID      string   `json:"id"`
+	Status  string   `json:"status"`
+	Outputs []string `json:"outputs"`
+	Error   string   `json:"error"`
+
+	// Old wrapped format fields
 	Code    int    `json:"code"`
 	Message string `json:"message"`
 	Data    struct {
@@ -320,24 +414,81 @@ type WaveSpeedTTSResponseWrapper struct {
 	} `json:"data"`
 }
 
-// GenerateSpeech generates speech using WaveSpeed Qwen3 TTS Voice Design API
+// GetStatus returns the status from either format
+func (r *WaveSpeedTTSResponseWrapper) GetStatus() string {
+	if r.Status != "" {
+		return r.Status
+	}
+	return r.Data.Status
+}
+
+// GetOutputs returns the outputs from either format
+func (r *WaveSpeedTTSResponseWrapper) GetOutputs() []string {
+	if len(r.Outputs) > 0 {
+		return r.Outputs
+	}
+	return r.Data.Outputs
+}
+
+// GetError returns the error from either format
+func (r *WaveSpeedTTSResponseWrapper) GetError() string {
+	if r.Error != "" {
+		return r.Error
+	}
+	return r.Data.Error
+}
+
+// GetID returns the ID from either format
+func (r *WaveSpeedTTSResponseWrapper) GetID() string {
+	if r.ID != "" {
+		return r.ID
+	}
+	return r.Data.ID
+}
+
+// GenerateSpeech generates speech using WaveSpeed Qwen3 TTS Text-to-Speech API
 // Returns the audio URL or audio data
+// voice parameter specifies the voice name, styleInstruction specifies the speaking style
 func (s *WaveSpeedService) GenerateSpeech(text, voiceDescription string) (string, error) {
+	return s.GenerateSpeechWithVoice(text, "", voiceDescription, "")
+}
+
+// GenerateSpeechWithVoice generates speech with explicit voice and style parameters
+func (s *WaveSpeedService) GenerateSpeechWithVoice(text, voice, styleInstruction, language string) (string, error) {
 	if s.cfg.WavespeedAPIKey == "" {
 		// Return placeholder in dev
 		return "PLACEHOLDER_AUDIO", nil
 	}
 
-	// Default voice description if not provided
-	if voiceDescription == "" {
-		voiceDescription = "A clear, neutral male voice with a natural tone. Moderate pace, conversational style."
+	// Use default voice and style if not provided
+	selectedVoice := DefaultVoice
+	selectedStyle := DefaultStyleInstruction
+
+	// Use provided voice if valid
+	if voice != "" {
+		for _, v := range Qwen3Voices {
+			if voice == v {
+				selectedVoice = voice
+				break
+			}
+		}
 	}
 
+	// Use provided style instruction if not empty
+	if styleInstruction != "" {
+		selectedStyle = styleInstruction
+	}
+
+	// Use the provided language, default to "auto" if not set
+	selectedLanguage := getLanguageName(language)
+
+	log.Printf("[TTS] Using voice: %s, style: %s, language: %s", selectedVoice, selectedStyle, selectedLanguage)
+
 	reqBody := WaveSpeedTTSRequest{
-		Model:            "wavespeed-ai/qwen3-tts/voice-design",
 		Text:             text,
-		VoiceDescription: voiceDescription,
-		Language:         "auto",
+		Language:         selectedLanguage,
+		Voice:            selectedVoice,
+		StyleInstruction: selectedStyle,
 	}
 
 	body, err := json.Marshal(reqBody)
@@ -345,7 +496,7 @@ func (s *WaveSpeedService) GenerateSpeech(text, voiceDescription string) (string
 		return "", fmt.Errorf("failed to marshal TTS request: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", "https://api.wavespeed.ai/api/v3/wavespeed-ai/qwen3-tts/voice-design", bytes.NewReader(body))
+	req, err := http.NewRequest("POST", "https://api.wavespeed.ai/api/v3/wavespeed-ai/qwen3-tts/text-to-speech", bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("failed to create TTS request: %w", err)
 	}
@@ -369,12 +520,16 @@ func (s *WaveSpeedService) GenerateSpeech(text, voiceDescription string) (string
 		return "", fmt.Errorf("failed to decode TTS response: %w", err)
 	}
 
-	// Check for API error
-	if result.Code != 200 {
+	// Check for API error (support both old wrapped format and new flat format)
+	if result.Code != 200 && result.Code != 0 {
 		return "", fmt.Errorf("wavespeed TTS API error: %s", result.Message)
 	}
 
-	taskID := result.Data.ID
+	// Get task ID - support both old wrapped format and new flat format
+	taskID := result.GetID()
+	if taskID == "" {
+		return "", fmt.Errorf("wavespeed TTS API error: no task ID returned")
+	}
 
 	// Poll for completion
 	return s.pollTTSResult(taskID)
@@ -413,12 +568,18 @@ func (s *WaveSpeedService) pollTTSResult(taskID string) (string, error) {
 		}
 		resp.Body.Close()
 
-		if result.Data.Status == "completed" && len(result.Data.Outputs) > 0 {
-			return result.Data.Outputs[0], nil
+		// Use helper methods to support both old and new response formats
+		status := result.GetStatus()
+		outputs := result.GetOutputs()
+		errMsg := result.GetError()
+
+		if status == "completed" && len(outputs) > 0 {
+			log.Printf("TTS task %s completed after %d attempts", taskID, attempt)
+			return outputs[0], nil
 		}
 
-		if result.Data.Status == "failed" {
-			return "", fmt.Errorf("wavespeed TTS generation failed: %s", result.Data.Error)
+		if status == "failed" {
+			return "", fmt.Errorf("wavespeed TTS generation failed: %s", errMsg)
 		}
 
 		// Wait before next poll
@@ -430,10 +591,10 @@ func (s *WaveSpeedService) pollTTSResult(taskID string) (string, error) {
 
 // CaptionSegment represents a caption with timing
 type CaptionSegment struct {
-	Index     int
-	Text      string
-	StartTime float64
-	EndTime   float64
+	Index     int     `json:"Index"`
+	Text      string  `json:"text"`
+	StartTime float64 `json:"start"`
+	EndTime   float64 `json:"end"`
 }
 
 // WaveSpeed Whisper request/response types
@@ -449,12 +610,24 @@ type WaveSpeedWhisperRequest struct {
 type WaveSpeedWhisperResponseWrapper struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
-	Data    struct {
-		ID          string          `json:"id"`
-		Status      string          `json:"status"`
-		Text        string          `json:"text"`
+	// Data field contains the actual result including outputs array
+	Data struct {
+		ID      string `json:"id"`
+		Status  string `json:"status"`
+		Outputs []struct {
+			ID          string           `json:"id"`
+			Status      string           `json:"status"`
+			Text        string           `json:"text"`
+			TextDetails []CaptionSegment `json:"text_details"` // Primary field for Whisper captions
+			SRT         string           `json:"srt"`         // SRT format fallback
+			Segments    []CaptionSegment `json:"segments"`
+			Error       string           `json:"error"`
+		} `json:"outputs"`
+		Text        string           `json:"text"`
+		TextDetails []CaptionSegment `json:"text_details"`
+		SRT         string           `json:"srt"`
 		Segments    []CaptionSegment `json:"segments"`
-		Error       string          `json:"error"`
+		Error       string           `json:"error"`
 	} `json:"data"`
 }
 
@@ -465,11 +638,9 @@ const (
 )
 
 // ConsistentVoice is a fixed voice profile for consistent TTS output across runs
-// This ensures the same voice characteristics every time
-const ConsistentVoice = "A warm, engaging male narrator voice with clear British accent. " +
-	"Moderate pace, storytelling style, professional audiobook narrator quality. " +
-	"Expressive but not dramatic, perfect for educational content. " +
-	"Consistent tone and rhythm throughout. Clear diction, confident delivery."
+// This ensures the same voice characteristics every time (used as style_instruction)
+const ConsistentVoice = "A warm, engaging narrator voice. Moderate pace, storytelling style, professional audiobook narrator quality. " +
+	"Expressive but not dramatic, perfect for educational content. Consistent tone and rhythm throughout. Clear diction, confident delivery."
 
 // ChunkText splits text into chunks that fit within the limit
 // Splits on sentence boundaries where possible
@@ -573,7 +744,7 @@ func (s *WaveSpeedService) GenerateUnifiedSpeech(unifiedText, voiceDescription s
 
 	// Default voice description if not provided
 	if voiceDescription == "" {
-		voiceDescription = "A warm, engaging male narrator voice. Clear diction, moderate pace, storytelling style, like a professional audiobook narrator."
+		voiceDescription = DefaultStyleInstruction
 	}
 
 	// The Qwen3 TTS API has a limit on text length (~2000 chars)
@@ -583,10 +754,10 @@ func (s *WaveSpeedService) GenerateUnifiedSpeech(unifiedText, voiceDescription s
 	}
 
 	reqBody := WaveSpeedTTSRequest{
-		Model:            "wavespeed-ai/qwen3-tts/voice-design",
 		Text:             unifiedText,
-		VoiceDescription: voiceDescription,
 		Language:         "auto",
+		Voice:            DefaultVoice,
+		StyleInstruction: voiceDescription,
 	}
 
 	body, err := json.Marshal(reqBody)
@@ -594,7 +765,7 @@ func (s *WaveSpeedService) GenerateUnifiedSpeech(unifiedText, voiceDescription s
 		return "", fmt.Errorf("failed to marshal unified TTS request: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", "https://api.wavespeed.ai/api/v3/wavespeed-ai/qwen3-tts/voice-design", bytes.NewReader(body))
+	req, err := http.NewRequest("POST", "https://api.wavespeed.ai/api/v3/wavespeed-ai/qwen3-tts/text-to-speech", bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("failed to create unified TTS request: %w", err)
 	}
@@ -618,15 +789,170 @@ func (s *WaveSpeedService) GenerateUnifiedSpeech(unifiedText, voiceDescription s
 		return "", fmt.Errorf("failed to decode unified TTS response: %w", err)
 	}
 
-	// Check for API error
-	if result.Code != 200 {
+	// Check for API error (support both old wrapped format and new flat format)
+	if result.Code != 200 && result.Code != 0 {
 		return "", fmt.Errorf("wavespeed unified TTS API error: %s", result.Message)
 	}
 
-	taskID := result.Data.ID
+	// Get task ID - support both old wrapped format and new flat format
+	taskID := result.GetID()
+	if taskID == "" {
+		return "", fmt.Errorf("wavespeed unified TTS API error: no task ID returned")
+	}
 
-	// Poll for completion
-	return s.pollTTSResult(taskID)
+	// Poll for completion using no-timeout client
+	return s.pollTTSResultBackground(taskID)
+}
+
+// GenerateUnifiedSpeechBackground generates audio without HTTP timeout constraints
+// Uses a dedicated HTTP client with no timeout for long-running TTS operations
+func (s *WaveSpeedService) GenerateUnifiedSpeechBackground(unifiedText, voiceDescription string) (string, error) {
+	return s.GenerateUnifiedSpeechBackgroundWithVoice(unifiedText, "", voiceDescription, "")
+}
+
+// GenerateUnifiedSpeechBackgroundWithVoice generates audio with explicit voice and style
+func (s *WaveSpeedService) GenerateUnifiedSpeechBackgroundWithVoice(unifiedText, voice, styleInstruction, language string) (string, error) {
+	if s.cfg.WavespeedAPIKey == "" {
+		// Return placeholder in dev
+		return "PLACEHOLDER_AUDIO", nil
+	}
+
+	// Use defaults if not provided
+	selectedVoice := DefaultVoice
+	selectedStyle := DefaultStyleInstruction
+
+	// Use provided voice if valid
+	if voice != "" {
+		for _, v := range Qwen3Voices {
+			if voice == v {
+				selectedVoice = voice
+				break
+			}
+		}
+	}
+
+	// Use provided style instruction if not empty
+	if styleInstruction != "" {
+		selectedStyle = styleInstruction
+	}
+
+	// Use the provided language, default to "auto" if not set
+	selectedLanguage := getLanguageName(language)
+
+	// The Qwen3 TTS API has a limit on text length (~2000 chars)
+	// Chunk text if it exceeds the limit
+	if len(unifiedText) > MaxTTSTextLength {
+		log.Printf("[TTS] Text length %d exceeds limit %d, chunking for TTS", len(unifiedText), MaxTTSTextLength)
+		return s.GenerateChunkedSpeechBackgroundWithVoice(unifiedText, selectedVoice, selectedStyle, selectedLanguage)
+	}
+	log.Printf("[TTS] Single TTS call for %d chars, voice: %s, language: %s", len(unifiedText), selectedVoice, selectedLanguage)
+
+	reqBody := WaveSpeedTTSRequest{
+		Text:             unifiedText,
+		Language:         selectedLanguage,
+		Voice:            selectedVoice,
+		StyleInstruction: selectedStyle,
+	}
+
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal unified TTS request: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", "https://api.wavespeed.ai/api/v3/wavespeed-ai/qwen3-tts/text-to-speech", bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("failed to create unified TTS request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+s.cfg.WavespeedAPIKey)
+
+	// Use no-timeout client for initial request
+	resp, err := s.clientNoTimeout.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to send unified TTS request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("wavespeed unified TTS API error: %d - %s", resp.StatusCode, string(respBody))
+	}
+
+	var resultB WaveSpeedTTSResponseWrapper
+	if err := json.NewDecoder(resp.Body).Decode(&resultB); err != nil {
+		return "", fmt.Errorf("failed to decode unified TTS response: %w", err)
+	}
+
+	// Check for API error (support both old wrapped format and new flat format)
+	if resultB.Code != 200 && resultB.Code != 0 {
+		return "", fmt.Errorf("wavespeed unified TTS API error: %s", resultB.Message)
+	}
+
+	// Get task ID - support both old wrapped format and new flat format
+	taskID := resultB.GetID()
+	if taskID == "" {
+		return "", fmt.Errorf("wavespeed unified TTS API error: no task ID returned")
+	}
+	log.Printf("TTS task submitted: %s, text length: %d chars", taskID, len(unifiedText))
+
+	// Poll for completion using no-timeout client
+	return s.pollTTSResultBackground(taskID)
+}
+
+// pollTTSResultBackground polls for TTS task completion using no-timeout client
+func (s *WaveSpeedService) pollTTSResultBackground(taskID string) (string, error) {
+	maxAttempts := 300 // Max 300 seconds (5 minutes) wait for TTS
+	attempt := 0
+
+	for attempt < maxAttempts {
+		attempt++
+		req, err := http.NewRequest("GET", fmt.Sprintf("https://api.wavespeed.ai/api/v3/predictions/%s/result", taskID), nil)
+		if err != nil {
+			return "", fmt.Errorf("failed to create polling request: %w", err)
+		}
+
+		req.Header.Set("Authorization", "Bearer "+s.cfg.WavespeedAPIKey)
+
+		// Use no-timeout client for polling
+		resp, err := s.clientNoTimeout.Do(req)
+		if err != nil {
+			return "", fmt.Errorf("failed to poll TTS result: %w", err)
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			// Wait and retry
+			time.Sleep(1 * time.Second)
+			continue
+		}
+
+		var result WaveSpeedTTSResponseWrapper
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			resp.Body.Close()
+			return "", fmt.Errorf("failed to decode TTS polling response: %w", err)
+		}
+		resp.Body.Close()
+
+		if result.Data.Status == "completed" && len(result.Data.Outputs) > 0 {
+			log.Printf("TTS task %s completed after %d attempts", taskID, attempt)
+			return result.Data.Outputs[0], nil
+		}
+
+		if result.Data.Status == "failed" {
+			return "", fmt.Errorf("wavespeed TTS generation failed: %s", result.Data.Error)
+		}
+
+		// Log progress every 30 attempts
+		if attempt%30 == 0 {
+			log.Printf("TTS task %s still processing (attempt %d/%d)", taskID, attempt, maxAttempts)
+		}
+
+		// Wait before next poll
+		time.Sleep(1 * time.Second)
+	}
+
+	return "", fmt.Errorf("TTS generation timed out after %d attempts", maxAttempts)
 }
 
 // GenerateChunkedSpeech handles long text by chunking and concatenating audio
@@ -665,6 +991,54 @@ func (s *WaveSpeedService) GenerateChunkedSpeech(unifiedText, voiceDescription s
 
 	// Concatenate all audio chunks
 	return s.concatenateAudio(audioDataList)
+}
+
+// GenerateChunkedSpeechBackground handles long text by chunking and concatenating audio using background client
+func (s *WaveSpeedService) GenerateChunkedSpeechBackground(unifiedText, voiceDescription string) (string, error) {
+	return s.GenerateChunkedSpeechBackgroundWithVoice(unifiedText, "", voiceDescription, "")
+}
+
+// GenerateChunkedSpeechBackgroundWithVoice handles long text by chunking with explicit voice and style
+func (s *WaveSpeedService) GenerateChunkedSpeechBackgroundWithVoice(unifiedText, voice, styleInstruction, language string) (string, error) {
+	// Chunk the text
+	chunks := ChunkText(unifiedText, MaxTTSTextLength)
+	log.Printf("Chunking text into %d chunks for TTS (background)", len(chunks))
+
+	if len(chunks) == 0 {
+		return "", fmt.Errorf("no text to generate speech from")
+	}
+
+	// If only one chunk, use background generation
+	if len(chunks) == 1 {
+		return s.GenerateSpeechWithVoice(chunks[0], voice, styleInstruction, language)
+	}
+
+	// Generate audio for each chunk using background client
+	var audioDataList [][]byte
+	for i, chunk := range chunks {
+		log.Printf("Generating TTS for chunk %d/%d (%d chars)", i+1, len(chunks), len(chunk))
+
+		audioURL, err := s.GenerateSpeechWithVoice(chunk, voice, styleInstruction, language)
+		if err != nil {
+			return "", fmt.Errorf("failed to generate speech for chunk %d: %w", i, err)
+		}
+
+		// Download audio
+		audioData, err := s.DownloadAudio(audioURL)
+		if err != nil {
+			return "", fmt.Errorf("failed to download audio for chunk %d: %w", i, err)
+		}
+
+		audioDataList = append(audioDataList, audioData)
+	}
+
+	// Concatenate all audio chunks
+	return s.concatenateAudio(audioDataList)
+}
+
+// GenerateSpeechBackground generates speech using background client without timeout
+func (s *WaveSpeedService) GenerateSpeechBackground(text, voiceDescription string) (string, error) {
+	return s.GenerateSpeechWithVoice(text, "", voiceDescription, "")
 }
 
 // concatenateAudio concatenates multiple audio files into one
@@ -780,26 +1154,72 @@ func (s *WaveSpeedService) GenerateCaptionsFromAudio(audioURL string) ([]Caption
 		return nil, fmt.Errorf("wavespeed Whisper API error: %d - %s", resp.StatusCode, string(respBody))
 	}
 
+	// Read response body for debugging
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read Whisper response body: %w", err)
+	}
+	log.Printf("[Whisper] Raw response body: %s", string(respBody))
+
 	var result WaveSpeedWhisperResponseWrapper
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.Unmarshal(respBody, &result); err != nil {
 		return nil, fmt.Errorf("failed to decode Whisper response: %w", err)
 	}
 
-	// Check for API error
-	if result.Code != 200 {
+	// Check for API error (code 0 means success)
+	if result.Code != 0 && result.Code != 200 {
 		return nil, fmt.Errorf("wavespeed Whisper API error: %s", result.Message)
 	}
 
 	// Return the segments from the response
+	// Priority: Outputs[0].TextDetails (new format) > Data.TextDetails > Segments > SRT parsing
+
+	// Check outputs array inside Data (API format: result.Data.Outputs)
+	var textDetails []CaptionSegment
+	var srtContent string
+	var fullText string
+
+	log.Printf("[Whisper] Raw response: Code=%d, Data.Outputs count=%d", result.Code, len(result.Data.Outputs))
+
+	if len(result.Data.Outputs) > 0 {
+		log.Printf("[Whisper] Output[0]: TextDetails count=%d, SRT len=%d, Text len=%d",
+			len(result.Data.Outputs[0].TextDetails), len(result.Data.Outputs[0].SRT), len(result.Data.Outputs[0].Text))
+		textDetails = result.Data.Outputs[0].TextDetails
+		srtContent = result.Data.Outputs[0].SRT
+		fullText = result.Data.Outputs[0].Text
+	} else {
+		// Fall back to legacy fields in Data
+		log.Printf("[Whisper] Using Data fields: TextDetails count=%d", len(result.Data.TextDetails))
+		textDetails = result.Data.TextDetails
+		srtContent = result.Data.SRT
+		fullText = result.Data.Text
+	}
+
+	if len(textDetails) > 0 {
+		log.Printf("[Whisper] Using TextDetails: %d segments", len(textDetails))
+		return textDetails, nil
+	}
+
 	if len(result.Data.Segments) > 0 {
+		log.Printf("[Whisper] Using Segments: %d segments", len(result.Data.Segments))
 		return result.Data.Segments, nil
+	}
+
+	// Fall back to SRT parsing if available
+	if srtContent != "" {
+		log.Printf("[Whisper] Falling back to SRT parsing")
+		segments, err := parseSRT(srtContent)
+		if err == nil && len(segments) > 0 {
+			return segments, nil
+		}
+		log.Printf("[Whisper] SRT parsing failed: %v", err)
 	}
 
 	// If no segments, return single segment with full text
 	return []CaptionSegment{
 		{
 			Index:     0,
-			Text:      result.Data.Text,
+			Text:      fullText,
 			StartTime: 0,
 			EndTime:   0, // Unknown duration
 		},
@@ -983,4 +1403,86 @@ func (s *WaveSpeedService) GenerateSpeechParallel(
 
 	log.Printf("Parallel TTS complete: %d/%d segments processed", completed, total)
 	return nil
+}
+
+// parseSRT parses SRT format and returns caption segments
+// SRT format:
+// 1
+// 00:00:00,000 --> 00:00:04,040
+// The text here
+//
+// 2
+// 00:00:04,560 --> 00:00:09,900
+// More text here
+func parseSRT(srtContent string) ([]CaptionSegment, error) {
+	var segments []CaptionSegment
+
+	lines := strings.Split(srtContent, "\n")
+	i := 0
+
+	// Regex for SRT timestamp: HH:MM:SS,mmm --> HH:MM:SS,mmm
+	timestampRegex := regexp.MustCompile(`(\d{2}):(\d{2}):(\d{2}),(\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2}),(\d{3})`)
+
+	for i < len(lines) {
+		line := strings.TrimSpace(lines[i])
+
+		// Skip empty lines
+		if line == "" {
+			i++
+			continue
+		}
+
+		// Check if this is an index line (just a number)
+		if matched, _ := regexp.MatchString(`^\d+$`, line); matched {
+			i++
+			continue
+		}
+
+		// Try to match timestamp line
+		matches := timestampRegex.FindStringSubmatch(line)
+		if matches != nil {
+			// Parse start time
+			startHours, _ := strconv.Atoi(matches[1])
+			startMinutes, _ := strconv.Atoi(matches[2])
+			startSeconds, _ := strconv.Atoi(matches[3])
+			startMillis, _ := strconv.Atoi(matches[4])
+			startTime := float64(startHours*3600+startMinutes*60+startSeconds) + float64(startMillis)/1000
+
+			// Parse end time
+			endHours, _ := strconv.Atoi(matches[5])
+			endMinutes, _ := strconv.Atoi(matches[6])
+			endSeconds, _ := strconv.Atoi(matches[7])
+			endMillis, _ := strconv.Atoi(matches[8])
+			endTime := float64(endHours*3600+endMinutes*60+endSeconds) + float64(endMillis)/1000
+
+			// Get text from the next line (not same line)
+			segmentText := ""
+			if i+1 < len(lines) {
+				nextLine := strings.TrimSpace(lines[i+1])
+				// Skip empty lines to find actual text
+				for nextLine == "" && i+2 < len(lines) {
+					i++
+					nextLine = strings.TrimSpace(lines[i+1])
+				}
+				segmentText = nextLine
+			}
+
+			// Skip empty text
+			if segmentText != "" {
+				segments = append(segments, CaptionSegment{
+					Index:     len(segments),
+					Text:      segmentText,
+					StartTime: startTime,
+					EndTime:   endTime,
+				})
+			}
+
+			i += 2 // Skip timestamp line and text line
+			continue
+		}
+
+		i++
+	}
+
+	return segments, nil
 }

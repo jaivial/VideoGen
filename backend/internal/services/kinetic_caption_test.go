@@ -149,13 +149,13 @@ func TestWrapText(t *testing.T) {
 	}{
 		// Short text - no wrapping
 		{"Hello World", "Hello World"},
-		// Text exactly at limit
-		{"1234567890123456789012345678901234567890", "1234567890123456789012345678901234567890"},
+		// Text exactly at limit (35 chars)
+		{"12345678901234567890123456789012345", "12345678901234567890123456789012345"},
 		// Text over limit - should wrap
-		{"1234567890123456789012345678901234567890 extra", "1234567890123456789012345678901234567890\\nextra"},
+		{"12345678901234567890123456789012345 extra", "12345678901234567890123456789012345\\nextra"},
 		// Multiple words wrapping
-		{"The quick brown fox jumps over the lazy dog", "The quick brown fox jumps over the lazy\\ndog"},
-		// Single long word
+		{"The quick brown fox jumps over the lazy dog", "The quick brown fox jumps over the\\nlazy dog"},
+		// Single long word (34 chars - fits in 35)
 		{"Supercalifragilisticexpialidocious", "Supercalifragilisticexpialidocious"},
 	}
 
@@ -217,30 +217,37 @@ func TestSplitIntoPhrases(t *testing.T) {
 
 	result := splitIntoPhrases(segments, 3)
 
-	// First segment: 6 words -> 2 phrases (3 + 3)
-	// Second segment: 3 words -> 1 phrase (3)
-	// Total: 3 phrases
-	if len(result) != 3 {
-		t.Errorf("Expected 3 phrases, got %d", len(result))
+	// Current implementation: one segment per original segment
+	// Each segment has chunks combined with newlines
+	// Timing is preserved from original segments
+	if len(result) != 2 {
+		t.Errorf("Expected 2 segments, got %d", len(result))
 	}
 
-	// Check first phrase (first 3 words)
-	if result[0].Text != "Hello world this" {
-		t.Errorf("First phrase = %q; want %q", result[0].Text, "Hello world this")
+	// First segment: 6 words with 3 words per phrase = 2 chunks combined with newlines
+	if result[0].Text != "Hello world this\nis a test" {
+		t.Errorf("First segment = %q; want %q", result[0].Text, "Hello world this\nis a test")
 	}
 
-	// Check timing for first phrase (3/5 * 3s = 1.8s, but actual is 3s/5*3 = 1.8s)
-	// Actually: 3.0 / 5 words = 0.6s per word, so 3 words = 1.5s
+	// Timing is preserved
 	if result[0].StartTime != 0.0 {
-		t.Errorf("First phrase start = %v; want 0.0", result[0].StartTime)
+		t.Errorf("First segment start = %v; want 0.0", result[0].StartTime)
 	}
-	if result[0].EndTime != 1.5 {
-		t.Errorf("First phrase end = %v; want 1.5", result[0].EndTime)
+	if result[0].EndTime != 3.0 {
+		t.Errorf("First segment end = %v; want 3.0", result[0].EndTime)
 	}
 
-	// Check second phrase (next 3 words)
-	if result[1].Text != "is a test" {
-		t.Errorf("Second phrase = %q; want %q", result[1].Text, "is a test")
+	// Second segment: 3 words with 3 words per phrase = 1 chunk
+	if result[1].Text != "Another sentence here" {
+		t.Errorf("Second segment = %q; want %q", result[1].Text, "Another sentence here")
+	}
+
+	// Timing is preserved
+	if result[1].StartTime != 3.0 {
+		t.Errorf("Second segment start = %v; want 3.0", result[1].StartTime)
+	}
+	if result[1].EndTime != 5.0 {
+		t.Errorf("Second segment end = %v; want 5.0", result[1].EndTime)
 	}
 
 	fmt.Printf("Split phrases result: %+v\n", result)

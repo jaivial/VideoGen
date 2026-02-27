@@ -293,15 +293,7 @@ func (w *VideoWorker) ProcessVideo(videoRequestID, userID uint64, videoURL, tran
 	w.updatePhase(videoRequestID, "translating")
 	w.broadcastStep(videoRequestID, "translating", "translating_start", 30, "Translating in chunks")
 
-	// Generate unified text from original segments
-	// Note: segments are already re-chunked to 1800-char chunks in the chunking phase
-	unifiedText := services.GenerateUnifiedTranscriptText(segments)
-	if len(unifiedText) == 0 {
-		w.handleError(videoRequestID, "translating", "translating_unified", "No text to translate")
-		return
-	}
-
-	// Segments are already 1800-char chunks from chunking phase
+	// Segments are already 1800-char chunks from chunking phase - use them directly for translation
 	textChunks := make([]string, len(segments))
 	for i, seg := range segments {
 		textChunks[i] = seg.OriginalText
@@ -311,7 +303,7 @@ func (w *VideoWorker) ProcessVideo(videoRequestID, userID uint64, videoURL, tran
 		return
 	}
 
-	log.Printf("Chunked transcript into %d text chunks for translation", len(textChunks))
+	log.Printf("Translating %d pre-chunked text segments", len(textChunks))
 
 	// Translate each chunk individually
 	translatedChunks, err := w.openRouter.TranslateTexts(textChunks, "en", outputLang)
