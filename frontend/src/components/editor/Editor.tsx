@@ -1,6 +1,6 @@
 import { DndContext, DragEndEvent, DragOverlay, DragStartEvent, PointerSensor, useSensor, useSensors } from '@dnd-kit/core'
 import { useState, useCallback, useEffect, useRef } from 'react'
-import { VideoPlayer, Timeline, Toolbar, MediaPanel, CaptionsPanel, EffectsPanel, ExportPanel } from './index'
+import { VideoPlayer, Timeline, Toolbar, MediaPanel, CaptionsPanel, EffectsPanel, ExportPanel, PropertiesPanel } from './index'
 import { useEditorStore, useActivePanel } from '../../stores/editorStore'
 
 interface EditorProps {
@@ -20,6 +20,7 @@ interface VideoMetadata {
 const extractVideoMetadata = (url: string): Promise<VideoMetadata> => {
   return new Promise((resolve) => {
     const video = document.createElement('video')
+    video.crossOrigin = 'anonymous'
     video.preload = 'metadata'
 
     video.onloadedmetadata = async () => {
@@ -91,11 +92,86 @@ const extractVideoMetadata = (url: string): Promise<VideoMetadata> => {
 export function Editor({ videoUrl, videoDuration = 60 }: EditorProps) {
   const activePanel = useActivePanel()
 
-  const { initializeFromVideo, setActivePanel } = useEditorStore()
+  const { initializeFromVideo, setActivePanel, removeClip, duplicateClip, setActiveTool, selectedClipIds, undo, redo, canUndo, canRedo } = useEditorStore()
 
   const [activeDragId, setActiveDragId] = useState<string | null>(null)
   const initialized = useRef(false)
   const [isLoadingMetadata, setIsLoadingMetadata] = useState(false)
+  const [timelineHeight, setTimelineHeight] = useState(256)
+  const [isResizing, setIsResizing] = useState(false)
+  const resizeRef = useRef<number | null>(null)
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Ignore if typing in an input
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
+        return
+      }
+
+      // Check for modifier keys
+      const isMod = e.metaKey || e.ctrlKey
+
+      // Delete/Backspace - remove selected clips
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        e.preventDefault()
+        selectedClipIds.forEach(clipId => removeClip(clipId))
+        return
+      }
+
+      // Ctrl/Cmd + D - duplicate selected clips
+      if (isMod && e.key === 'd') {
+        e.preventDefault()
+        selectedClipIds.forEach(clipId => duplicateClip(clipId))
+        return
+      }
+
+      // Ctrl/Cmd + Z - undo
+      if (isMod && e.key === 'z' && !e.shiftKey) {
+        e.preventDefault()
+        if (canUndo()) undo()
+        return
+      }
+
+      // Ctrl/Cmd + Y or Ctrl/Cmd + Shift + Z - redo
+      if ((isMod && e.key === 'y') || (isMod && e.shiftKey && e.key === 'z')) {
+        e.preventDefault()
+        if (canRedo()) redo()
+        return
+      }
+
+      // V - selection tool
+      if (e.key === 'v' && !isMod) {
+        e.preventDefault()
+        setActiveTool('select')
+        return
+      }
+
+      // B - blade tool (split clip)
+      if (e.key === 'b' && !isMod) {
+        e.preventDefault()
+        setActiveTool('blade')
+        return
+      }
+
+      // T - trim tool
+      if (e.key === 't' && !isMod) {
+        e.preventDefault()
+        setActiveTool('trim')
+        return
+      }
+
+      // Ctrl+T - text tool
+      if (isMod && e.key === 't') {
+        e.preventDefault()
+        setActiveTool('text')
+        return
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [selectedClipIds, removeClip, duplicateClip, undo, redo, canUndo, canRedo, setActiveTool])
 
   // Initialize with video if provided (only once)
   useEffect(() => {
@@ -146,7 +222,7 @@ export function Editor({ videoUrl, videoDuration = 60 }: EditorProps) {
 
   // Handle drag end
   const handleDragEnd = useCallback((event: DragEndEvent) => {
-    const { active, over } = event
+    const { active, over, delta } = event
     setActiveDragId(null)
 
     if (!over) return
@@ -157,18 +233,59 @@ export function Editor({ videoUrl, videoDuration = 60 }: EditorProps) {
       if (overData?.type === 'track') {
         const clipData = active.data.current
         if (clipData?.clip && clipData?.track) {
-          // Calculate new start time based on drop position
           const track = overData.track
-          const newStartTime = track.clips.length > 0
-            ? Math.max(...track.clips.map((c: { startTime: number; duration: number }) => c.startTime + c.duration))
-            : 0
+          const zoom = useEditorStore.getState().zoom
 
-          // Move clip to new track
+          // Get the drop position from the over element
+          // The over.id is the track id, so we need to calculate position from delta
+          // Calculate new start time based on the original position + delta movement
+          const originalClip = clipData.clip
+          let newStartTime = originalClip.startTime + (delta.x / zoom)
+
+          // Ensure non-negative start time
+          newStartTime = Math.max(0, newStartTime)
+
+          // Round to 2 decimal places for precision
+          newStartTime = Math.round(newStartTime * 100) / 100
+
+          // Move clip to new track at calculated position
           useEditorStore.getState().moveClip(active.id as string, track.id, newStartTime)
         }
       }
     }
   }, [])
+
+  // Handle timeline resize
+  const handleResizeStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    setIsResizing(true)
+    resizeRef.current = e.clientY
+  }, [])
+
+  useEffect(() => {
+    if (!isResizing) return
+
+    const handleMouseMove = (e: MouseEvent) => {
+      if (resizeRef.current === null) return
+      const delta = resizeRef.current - e.clientY
+      const newHeight = Math.max(150, Math.min(500, timelineHeight + delta))
+      setTimelineHeight(newHeight)
+      resizeRef.current = e.clientY
+    }
+
+    const handleMouseUp = () => {
+      setIsResizing(false)
+      resizeRef.current = null
+    }
+
+    document.addEventListener('mousemove', handleMouseMove)
+    document.addEventListener('mouseup', handleMouseUp)
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove)
+      document.removeEventListener('mouseup', handleMouseUp)
+    }
+  }, [isResizing, timelineHeight])
 
   const renderPanel = () => {
     switch (activePanel) {
@@ -178,6 +295,8 @@ export function Editor({ videoUrl, videoDuration = 60 }: EditorProps) {
         return <CaptionsPanel />
       case 'effects':
         return <EffectsPanel />
+      case 'properties':
+        return <PropertiesPanel />
       case 'export':
         return <ExportPanel />
       default:
@@ -217,7 +336,22 @@ export function Editor({ videoUrl, videoDuration = 60 }: EditorProps) {
             </div>
 
             {/* Timeline */}
-            <div className="h-64 border-t border-gray-700">
+            <div
+              className="border-t border-gray-700 relative"
+              style={{ height: timelineHeight }}
+            >
+              {/* Resize handle */}
+              <div
+                className={`absolute top-0 left-0 right-0 h-1 cursor-ns-resize hover:bg-blue-500 transition-colors z-30 ${
+                  isResizing ? 'bg-blue-500' : ''
+                }`}
+                onMouseDown={handleResizeStart}
+              >
+                <div className="absolute left-1/2 -translate-x-1/2 top-0 flex flex-col gap-0.5">
+                  <div className="w-8 h-0.5 bg-gray-500 rounded" />
+                  <div className="w-8 h-0.5 bg-gray-500 rounded" />
+                </div>
+              </div>
               <Timeline />
             </div>
           </div>
@@ -226,7 +360,7 @@ export function Editor({ videoUrl, videoDuration = 60 }: EditorProps) {
           <div className="w-80 bg-gray-800 border-l border-gray-700 flex flex-col">
             {/* Panel tabs */}
             <div className="flex border-b border-gray-700">
-              {(['media', 'captions', 'effects', 'export'] as const).map((panel) => (
+              {(['media', 'captions', 'effects', 'properties', 'export'] as const).map((panel) => (
                 <button
                   key={panel}
                   onClick={() => setActivePanel(panel)}

@@ -1,9 +1,9 @@
-import { useMemo } from 'react'
+import { useMemo, useState, useCallback, useRef } from 'react'
 import { useDroppable } from '@dnd-kit/core'
 import { useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import type { Track as TrackType, Clip as ClipType } from '../../../types/editor'
-import { useZoom, useSelectedClips, useEditorStore } from '../../../stores/editorStore'
+import { useZoom, useSelectedClips, useEditorStore, useActiveTool } from '../../../stores/editorStore'
 
 interface TrackProps {
   track: TrackType
@@ -72,8 +72,13 @@ interface TrackClipProps {
 
 function TrackClip({ clip, track }: TrackClipProps) {
   const zoom = useZoom()
+  const activeTool = useActiveTool()
   const selectedClips = useSelectedClips()
-  const { selectClip } = useEditorStore()
+  const { selectClip, updateClip, splitClip } = useEditorStore()
+
+  const [isTrimming, setIsTrimming] = useState<'left' | 'right' | null>(null)
+  const trimStartRef = useRef(clip.trimStart)
+  const trimEndRef = useRef(clip.trimEnd)
 
   const isSelected = selectedClips.includes(clip.id)
 
@@ -95,6 +100,49 @@ function TrackClip({ clip, track }: TrackClipProps) {
     left: clip.startTime * zoom,
     width: clip.duration * zoom,
   }
+
+  // Handle trim start
+  const handleTrimStart = useCallback((side: 'left' | 'right', e: React.MouseEvent) => {
+    e.stopPropagation()
+    e.preventDefault()
+    setIsTrimming(side)
+    trimStartRef.current = clip.trimStart
+    trimEndRef.current = clip.trimEnd
+
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      const trackElement = (moveEvent.target as HTMLElement).closest('.timeline-tracks')
+      if (!trackElement) return
+
+      const rect = trackElement.getBoundingClientRect()
+      const trackLeft = rect.left + 150 // account for track header
+      const mouseX = moveEvent.clientX - trackLeft
+
+      // Calculate time based on mouse position relative to clip
+      const clipLeft = clip.startTime * zoom
+      const clipWidth = clip.duration * zoom
+      const relativeX = mouseX - clipLeft
+
+      if (side === 'left') {
+        // Left trim: adjust trimStart
+        const newTrimStart = Math.max(0, Math.min(relativeX / zoom, clip.trimEnd - 0.1))
+        updateClip(clip.id, { trimStart: newTrimStart })
+      } else {
+        // Right trim: adjust trimEnd
+        const maxTrimEnd = 'originalDuration' in clip ? (clip as any).originalDuration : clip.duration
+        const newTrimEnd = Math.max(clip.trimStart + 0.1, Math.min(relativeX / zoom, maxTrimEnd))
+        updateClip(clip.id, { trimEnd: newTrimEnd })
+      }
+    }
+
+    const handleMouseUp = () => {
+      setIsTrimming(null)
+      document.removeEventListener('mousemove', handleMouseMove)
+      document.removeEventListener('mouseup', handleMouseUp)
+    }
+
+    document.addEventListener('mousemove', handleMouseMove)
+    document.addEventListener('mouseup', handleMouseUp)
+  }, [clip, zoom, updateClip])
 
   // Clip colors based on type
   const clipColors: Record<string, string> = {
@@ -131,6 +179,24 @@ function TrackClip({ clip, track }: TrackClipProps) {
       `}
       onClick={(e) => {
         e.stopPropagation()
+
+        // Handle blade tool - split clip at click position
+        if (activeTool === 'blade') {
+          const rect = e.currentTarget.getBoundingClientRect()
+          const clickX = e.clientX - rect.left
+          const clipWidth = clip.duration * zoom
+          const relativeX = clickX
+          const splitRatio = relativeX / clipWidth
+
+          // Only split if click is within the clip bounds (not at edges)
+          if (splitRatio > 0.05 && splitRatio < 0.95) {
+            const splitTime = clip.startTime + (clip.duration * splitRatio)
+            splitClip(clip.id, splitTime)
+          }
+          return
+        }
+
+        // Normal selection
         selectClip(clip.id, e.shiftKey)
       }}
       onDoubleClick={handleDoubleClick}
@@ -152,8 +218,14 @@ function TrackClip({ clip, track }: TrackClipProps) {
       </div>
 
       {/* Trim handles (left/right edges) */}
-      <div className="absolute inset-y-0 left-0 w-1.5 bg-white/30 cursor-ew-resize hover:bg-white/60 transition-colors" />
-      <div className="absolute inset-y-0 right-0 w-1.5 bg-white/30 cursor-ew-resize hover:bg-white/60 transition-colors" />
+      <div
+        className={`absolute inset-y-0 left-0 w-1.5 bg-white/30 cursor-ew-resize hover:bg-white/60 transition-colors ${isTrimming === 'left' ? 'bg-white' : ''}`}
+        onMouseDown={(e) => handleTrimStart('left', e)}
+      />
+      <div
+        className={`absolute inset-y-0 right-0 w-1.5 bg-white/30 cursor-ew-resize hover:bg-white/60 transition-colors ${isTrimming === 'right' ? 'bg-white' : ''}`}
+        onMouseDown={(e) => handleTrimStart('right', e)}
+      />
 
       {/* Video thumbnail placeholder */}
       {clip.type === 'video' && thumbnailUrl && (
@@ -163,16 +235,36 @@ function TrackClip({ clip, track }: TrackClipProps) {
         />
       )}
 
-      {/* Audio waveform placeholder */}
+      {/* Audio waveform */}
       {clip.type === 'audio' && (
-        <div className="absolute inset-0 flex items-center justify-center gap-px overflow-hidden opacity-50">
-          {Array.from({ length: Math.floor(clip.duration * 10) }).map((_, i) => (
-            <div
-              key={i}
-              className="w-0.5 bg-white rounded-full"
-              style={{ height: `${Math.random() * 60 + 20}%` }}
-            />
-          ))}
+        <div className="absolute inset-0 flex items-center justify-center gap-px overflow-hidden opacity-70">
+          {(() => {
+            const waveform = 'waveformData' in clip ? (clip as any).waveformData : null
+            const samples = Math.floor(clip.duration * 10)
+            if (waveform && waveform.length > 0) {
+              // Resample waveform to match clip duration
+              const resampled: number[] = []
+              for (let i = 0; i < samples; i++) {
+                const idx = Math.floor((i / samples) * waveform.length)
+                resampled.push(waveform[idx])
+              }
+              return resampled.map((v, i) => (
+                <div
+                  key={i}
+                  className="w-0.5 bg-white/80 rounded-full"
+                  style={{ height: `${Math.max(5, v * 80)}%` }}
+                />
+              ))
+            }
+            // Fallback to simple visualization
+            return Array.from({ length: samples }).map((_, i) => (
+              <div
+                key={i}
+                className="w-0.5 bg-white/60 rounded-full"
+                style={{ height: `${20 + Math.sin(i * 0.3) * 15}%` }}
+              />
+            ))
+          })()}
         </div>
       )}
     </div>

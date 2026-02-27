@@ -90,7 +90,7 @@ export function Timeline() {
           <input
             type="range"
             min="10"
-            max="150"
+            max="200"
             value={zoom}
             onChange={(e) => setZoom(parseInt(e.target.value))}
             className="w-24 h-1 bg-gray-600 rounded-lg appearance-none cursor-pointer"

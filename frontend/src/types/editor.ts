@@ -62,6 +62,7 @@ export interface AudioClip extends BaseClip {
   fadeOut: number         // fade out duration
   volumeKeyframes: Keyframe[]
   effects: Effect[]
+  waveformData?: number[]  // Pre-extracted waveform peaks for visualization
 }
 
 export type Clip = VideoClip | AudioClip | CaptionClip
@@ -214,6 +215,7 @@ export interface MediaItem {
   width?: number        // for images/video
   height?: number
   fps?: number          // frames per second (for video)
+  waveformData?: number[]  // for audio - waveform visualization
   createdAt: number
 }
 
@@ -262,7 +264,7 @@ export interface EditorState {
   zoom: number
   scrollX: number
   activeTool: EditorTool
-  activePanel: 'media' | 'effects' | 'text' | 'export' | 'captions'
+  activePanel: 'media' | 'effects' | 'text' | 'export' | 'captions' | 'properties'
 }
 
 // Timeline display helpers
@@ -270,4 +272,33 @@ export interface TimeMarker {
   time: number
   label: string
   major: boolean
+}
+
+// Generated video assets from backend
+export interface GeneratedVideo {
+  id: number
+  phase_of_generation: string
+  output_language: string
+  downloaded: boolean
+  bunny_video_url: string
+  bunny_audio_url: string
+  has_caption_segments: boolean
+  created_at: string
+  error_message?: string
+}
+
+export interface VideoAssets {
+  id: number
+  download_url: string
+  audio_url: string
+  caption_segments: CaptionSegment[]
+  transcribed_text: string
+  output_language: string
+}
+
+export interface CaptionSegment {
+  index: number
+  text: string
+  start: number
+  end: number
 }
