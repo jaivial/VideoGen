@@ -5,46 +5,46 @@ export interface WaveformData {
   duration: number // Audio duration in seconds
 }
 
-// Generate waveform data from an audio URL
-export async function generateWaveform(audioUrl: string, samples: number = 200): Promise<WaveformData> {
-  return new Promise((resolve, reject) => {
-    const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)()
-    const audio = new Audio()
-    audio.crossOrigin = 'anonymous'
+export async function generateWaveformFromArrayBuffer(arrayBuffer: ArrayBuffer, samples: number = 200): Promise<WaveformData> {
+  const AudioContextImpl = (window.AudioContext || (window as any).webkitAudioContext) as typeof AudioContext
+  const audioContext = new AudioContextImpl()
 
-    audio.onload = async () => {
-      try {
-        const duration = audio.duration
-        const arrayBuffer = await fetch(audioUrl).then(r => r.arrayBuffer())
-        const audioBuffer = await audioContext.decodeAudioData(arrayBuffer)
+  try {
+    // Some browsers detach the underlying buffer while decoding
+    const audioBuffer = await audioContext.decodeAudioData(arrayBuffer.slice(0))
+    const duration = audioBuffer.duration || 0
 
-        // Get channel data
-        const channelData = audioBuffer.getChannelData(0)
-        const blockSize = Math.floor(channelData.length / samples)
-        const peaks: number[] = []
+    const channelData = audioBuffer.getChannelData(0)
+    const safeSamples = Math.max(8, Math.min(samples, 2000))
+    const blockSize = Math.max(1, Math.floor(channelData.length / safeSamples))
 
-        for (let i = 0; i < samples; i++) {
-          const start = i * blockSize
-          let sum = 0
-          for (let j = 0; j < blockSize; j++) {
-            sum += Math.abs(channelData[start + j])
-          }
-          peaks.push(sum / blockSize)
-        }
-
-        // Normalize peaks
-        const maxPeak = Math.max(...peaks)
-        const normalizedPeaks = peaks.map(p => p / maxPeak)
-
-        resolve({ peaks: normalizedPeaks, duration })
-      } catch (err) {
-        reject(err)
+    const peaks: number[] = []
+    for (let i = 0; i < safeSamples; i++) {
+      const start = i * blockSize
+      const end = Math.min(channelData.length, start + blockSize)
+      let sum = 0
+      for (let j = start; j < end; j++) {
+        sum += Math.abs(channelData[j])
       }
+      peaks.push(sum / Math.max(1, end - start))
     }
 
-    audio.onerror = () => reject(new Error('Failed to load audio'))
-    audio.src = audioUrl
-  })
+    const maxPeak = Math.max(...peaks, 1e-6)
+    const normalizedPeaks = peaks.map(p => Math.min(1, p / maxPeak))
+
+    return { peaks: normalizedPeaks, duration }
+  } finally {
+    // Avoid leaking AudioContexts on repeated imports
+    if (typeof audioContext.close === 'function') {
+      await audioContext.close().catch(() => {})
+    }
+  }
+}
+
+// Generate waveform data from an audio URL
+export async function generateWaveform(audioUrl: string, samples: number = 200): Promise<WaveformData> {
+  const arrayBuffer = await fetch(audioUrl).then(r => r.arrayBuffer())
+  return generateWaveformFromArrayBuffer(arrayBuffer, samples)
 }
 
 // Generate mock waveform data for preview (without actual audio)

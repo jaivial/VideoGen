@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup } from '@testing-library/react'
 import { VideoPlayer } from './VideoPlayer'
 import { useEditorStore } from '../../stores/editorStore'
 
@@ -11,35 +11,29 @@ describe('VideoPlayer', () => {
   beforeEach(() => {
     vi.clearAllMocks()
 
-    // Reset store state by calling actions directly (not setState)
-    const store = useEditorStore
-
-    // Clear clips from all tracks
-    const state = store.getState()
-    state.tracks.forEach(track => {
-      while (track.clips.length > 0) {
-        state.removeClip(track.clips[0].id)
-      }
-    })
+    // Clear clips from all tracks (must re-read state; immer updates create new objects)
+    while (true) {
+      const state = useEditorStore.getState()
+      const trackWithClip = state.tracks.find((t) => t.clips.length > 0)
+      if (!trackWithClip) break
+      state.removeClip(trackWithClip.clips[0].id)
+    }
 
     // Reset other state
-    store.getState().setCurrentTime(0)
-    store.getState().setDuration(0)
-    store.getState().setIsPlaying(false)
-    store.getState().setZoom(50)
-    store.getState().setScrollX(0)
-    store.getState().deselectAll()
+    useEditorStore.getState().setCurrentTime(0)
+    useEditorStore.getState().setDuration(0)
+    useEditorStore.getState().setIsPlaying(false)
+    useEditorStore.getState().setZoom(50)
+    useEditorStore.getState().setScrollX(0)
+    useEditorStore.getState().deselectAll()
 
-    // Mock HTMLMediaElement methods
-    vi.stubGlobal('HTMLMediaElement', {
-      prototype: {
-        play: mockPlay,
-        pause: mockPause,
-      },
-    })
+    // Mock HTMLMediaElement methods (jsdom doesn't implement play/pause)
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockImplementation(mockPlay as any)
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(mockPause as any)
   })
 
   afterEach(() => {
+    cleanup()
     vi.restoreAllMocks()
   })
 
@@ -80,6 +74,27 @@ describe('VideoPlayer', () => {
 
   describe('play/pause functionality', () => {
     it('should toggle play/pause when clicking the player', () => {
+      const store = useEditorStore
+      const state = store.getState()
+      const videoTrack = state.tracks.find((t) => t.type === 'video')!
+
+      // Add a video clip so playback can start
+      store.getState().addClip(videoTrack.id, {
+        mediaId: 'media-1',
+        name: 'Test Video',
+        type: 'video',
+        startTime: 0,
+        duration: 30,
+        trimStart: 0,
+        trimEnd: 30,
+        url: 'https://example.com/test-video.mp4',
+        volume: 1,
+        speed: 1,
+        volumeKeyframes: [],
+        speedKeyframes: [],
+        effects: [],
+      })
+
       render(<VideoPlayer />)
 
       // Initially not playing
@@ -121,12 +136,8 @@ describe('VideoPlayer', () => {
 
       render(<VideoPlayer />)
 
-      // The play overlay icon should be visible (play icon inside the play button)
-      const playButtons = document.querySelectorAll('svg')
-      const playIcon = Array.from(playButtons).find(
-        (svg) => svg.getAttribute('d') === 'M8 5v14l11-7z'
-      )
-      expect(playIcon).toBeInTheDocument()
+      // Overlay uses the larger play icon (w-8 h-8). Controls use w-4 h-4.
+      expect(document.querySelector('svg.w-8.h-8')).toBeInTheDocument()
     })
 
     it('should have play/pause button in controls', () => {

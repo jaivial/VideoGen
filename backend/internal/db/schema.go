@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql"
+	mysql "github.com/go-sql-driver/mysql"
 	"github.com/jmoiron/sqlx"
 )
 
@@ -59,8 +59,14 @@ CREATE TABLE IF NOT EXISTS videos_requested (
     transcribed_text TEXT,
     is_generating BOOLEAN DEFAULT FALSE,
     phase_of_generation VARCHAR(50) DEFAULT 'pending',
+    error_message TEXT,
     output_language VARCHAR(10) NOT NULL,
     bunny_video_id VARCHAR(255),
+    bunny_video_url VARCHAR(512),
+    bunny_audio_url VARCHAR(512),
+    editor_caption_segments LONGTEXT,
+    editor_audio_segments LONGTEXT,
+    editor_image_segments LONGTEXT,
     download_expires_at TIMESTAMP,
     downloaded BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -140,5 +146,56 @@ func NewConnection(host, port, user, password, dbname string) (*DB, error) {
 		return nil, fmt.Errorf("failed to initialize schema: %w", err)
 	}
 
+	// Backward-compatible migration for existing databases created before
+	// newer columns were added to videos_requested.
+	if err := ensureVideosRequestedColumns(db); err != nil {
+		return nil, fmt.Errorf("failed to migrate videos_requested columns: %w", err)
+	}
+
 	return &DB{db}, nil
+}
+
+func ensureVideosRequestedColumns(db *sqlx.DB) error {
+	type columnSpec struct {
+		name       string
+		definition string
+	}
+
+	required := []columnSpec{
+		{name: "error_message", definition: "TEXT NULL"},
+		{name: "bunny_video_url", definition: "VARCHAR(512) NULL"},
+		{name: "bunny_audio_url", definition: "VARCHAR(512) NULL"},
+		{name: "editor_caption_segments", definition: "LONGTEXT NULL"},
+		{name: "editor_audio_segments", definition: "LONGTEXT NULL"},
+		{name: "editor_image_segments", definition: "LONGTEXT NULL"},
+	}
+
+	for _, column := range required {
+		var exists int
+		err := db.Get(&exists, `
+			SELECT COUNT(*)
+			FROM information_schema.columns
+			WHERE table_schema = DATABASE()
+			  AND table_name = 'videos_requested'
+			  AND column_name = ?`,
+			column.name,
+		)
+		if err != nil {
+			return err
+		}
+		if exists > 0 {
+			continue
+		}
+
+		statement := fmt.Sprintf("ALTER TABLE videos_requested ADD COLUMN %s %s", column.name, column.definition)
+		if _, err := db.Exec(statement); err != nil {
+			// If another process added the column concurrently, ignore.
+			if mysqlErr, ok := err.(*mysql.MySQLError); ok && mysqlErr.Number == 1060 {
+				continue
+			}
+			return err
+		}
+	}
+
+	return nil
 }

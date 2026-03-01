@@ -35,12 +35,12 @@ type BunnyService struct {
 }
 
 type BunnyStorageResponse struct {
-	Guid             string `json:"Guid"`
+	Guid            string `json:"Guid"`
 	StorageZoneName string `json:"StorageZoneName"`
-	DateCreated      int64  `json:"DateCreated"`
-	LastModified     int64  `json:"LastModified"`
-	Bytes            int64  `json:"Bytes"`
-	IsReady          bool   `json:"IsReady"`
+	DateCreated     int64  `json:"DateCreated"`
+	LastModified    int64  `json:"LastModified"`
+	Bytes           int64  `json:"Bytes"`
+	IsReady         bool   `json:"IsReady"`
 }
 
 type BunnySignedURLResponse struct {
@@ -52,6 +52,10 @@ func NewBunnyService(cfg *config.Config) *BunnyService {
 		cfg:    cfg,
 		client: &http.Client{},
 	}
+}
+
+func (s *BunnyService) IsConfigured() bool {
+	return s != nil && s.cfg != nil && s.cfg.BunnyStorageName != "" && s.cfg.BunnyStoragePass != ""
 }
 
 // getCDNHost returns the CDN hostname for public URLs

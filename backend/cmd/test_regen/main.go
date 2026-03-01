@@ -8,15 +8,11 @@ import (
 	"os/exec"
 	"path/filepath"
 
-	"github.com/joho/godotenv"
 	"video-generator/internal/config"
 	"video-generator/internal/services"
 )
 
 func main() {
-	// Load .env
-	godotenv.Load("/root/video-generator/.env")
-
 	videoID := 1772030750
 	tempDir := "/tmp/video_generator"
 

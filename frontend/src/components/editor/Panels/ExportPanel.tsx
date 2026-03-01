@@ -1,37 +1,95 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useEditorStore } from '../../../stores/editorStore'
 import { RESOLUTIONS } from '../../../types/editor'
+import { api } from '../../../api'
 
-export function ExportPanel() {
+interface ExportPanelProps {
+  videoId?: string
+}
+
+export function ExportPanel({ videoId }: ExportPanelProps) {
   const { duration, tracks } = useEditorStore()
 
   const [resolution, setResolution] = useState('1920x1080')
   const [frameRate, setFrameRate] = useState(30)
   const [quality, setQuality] = useState(23) // CRF value (lower = better)
   const [format, setFormat] = useState<'mp4' | 'webm'>('mp4')
+  const [includeAudio, setIncludeAudio] = useState(true)
   const [isExporting, setIsExporting] = useState(false)
-  const [progress, setProgress] = useState(0)
+  const [error, setError] = useState<string | null>(null)
+  const [resultUrl, setResultUrl] = useState<string | null>(null)
 
-  const handleExport = async () => {
-    setIsExporting(true)
-    setProgress(0)
+  useEffect(() => {
+    return () => {
+      if (resultUrl?.startsWith('blob:')) URL.revokeObjectURL(resultUrl)
+    }
+  }, [resultUrl])
 
-    // Simulate export progress
-    const interval = setInterval(() => {
-      setProgress((prev) => {
-        if (prev >= 100) {
-          clearInterval(interval)
-          setIsExporting(false)
-          return 100
+  const { width, height } = useMemo(() => {
+    const [w, h] = resolution.split('x').map((v) => parseInt(v, 10))
+    return { width: w || 1920, height: h || 1080 }
+  }, [resolution])
+
+  const payload = useMemo(() => ({
+    mode: 'export',
+    tracks,
+    export: {
+      width,
+      height,
+      frameRate,
+      format,
+      crf: quality,
+      includeAudio,
+    },
+  }), [tracks, width, height, frameRate, format, quality, includeAudio])
+
+  const hasLocalOnlyClips = useMemo(() => {
+    for (const track of tracks) {
+      for (const clip of track.clips as any[]) {
+        if (typeof clip.url === 'string' && clip.url.startsWith('blob:')) {
+          return true
         }
-        return prev + 10
-      })
-    }, 500)
+      }
+    }
+    return false
+  }, [tracks])
 
-    // In a real implementation, this would call the backend API
-    console.log('Exporting with settings:', { resolution, frameRate, quality, format })
-    console.log('Project duration:', duration)
-    console.log('Tracks:', tracks)
+  const runRender = async (mode: 'preview' | 'export') => {
+    if (!videoId) {
+      setError('Missing video id')
+      return
+    }
+    if (format === 'webm') {
+      setError('WebM export not supported yet')
+      return
+    }
+    if (hasLocalOnlyClips) {
+      setError('Some clips are local-only blob URLs. Re-upload those media files before server render.')
+      return
+    }
+
+    setError(null)
+    setIsExporting(true)
+
+    try {
+      const blob = await api.renderEditedVideo(videoId, { ...payload, mode })
+      const url = URL.createObjectURL(blob)
+      setResultUrl((prev) => {
+        if (prev?.startsWith('blob:')) URL.revokeObjectURL(prev)
+        return url
+      })
+
+      if (mode === 'export') {
+        const a = document.createElement('a')
+        a.href = url
+        a.download = `edited_${videoId}.mp4`
+        a.click()
+      }
+    } catch (err: any) {
+      setError(err.message || 'Render failed')
+    } finally {
+      setIsExporting(false)
+    }
   }
 
   return (
@@ -43,6 +101,12 @@ export function ExportPanel() {
 
       {/* Export settings */}
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
+        {error && (
+          <div className="p-3 rounded-lg border border-red-500/30 bg-red-500/10 text-red-200 text-sm">
+            {error}
+          </div>
+        )}
+
         {/* Resolution */}
         <div>
           <label className="block text-xs text-gray-400 mb-1">Resolution</label>
@@ -122,6 +186,16 @@ export function ExportPanel() {
           </div>
         </div>
 
+        {/* Include audio */}
+        <label className="flex items-center gap-2 text-sm text-gray-300">
+          <input
+            type="checkbox"
+            checked={includeAudio}
+            onChange={(e) => setIncludeAudio(e.target.checked)}
+          />
+          Include audio
+        </label>
+
         {/* Estimated file size */}
         <div className="p-3 bg-gray-800 rounded-lg">
           <div className="text-xs text-gray-400">Estimated file size</div>
@@ -129,34 +203,49 @@ export function ExportPanel() {
             ~{Math.round(duration * (format === 'mp4' ? 1 : 0.7) * (40 - quality))} MB
           </div>
         </div>
+
+        {/* Result preview */}
+        {resultUrl && (
+          <div className="space-y-2">
+            <div className="text-xs text-gray-400">Rendered preview</div>
+            <video src={resultUrl} controls className="w-full rounded-lg border border-gray-700 bg-black" />
+            <button
+              onClick={() => {
+                const a = document.createElement('a')
+                a.href = resultUrl
+                a.download = `edited_${videoId || 'video'}.mp4`
+                a.click()
+              }}
+              className="w-full py-2 bg-white/10 hover:bg-white/15 text-white text-sm rounded-lg border border-white/10"
+            >
+              Download rendered file
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Export button */}
       <div className="p-4 border-t border-gray-700">
-        {isExporting ? (
-          <div className="space-y-2">
-            <div className="h-2 bg-gray-700 rounded-full overflow-hidden">
-              <div
-                className="h-full bg-green-500 transition-all"
-                style={{ width: `${progress}%` }}
-              />
-            </div>
-            <div className="text-center text-xs text-gray-400">
-              Exporting... {progress}%
-            </div>
-          </div>
-        ) : (
+        <div className="flex gap-2">
           <button
-            onClick={handleExport}
-            disabled={duration === 0}
-            className="w-full py-3 bg-green-600 hover:bg-green-500 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-medium rounded-lg flex items-center justify-center gap-2"
+            onClick={() => runRender('preview')}
+            disabled={duration === 0 || !videoId || isExporting || hasLocalOnlyClips}
+            className="flex-1 py-3 bg-white/10 hover:bg-white/15 disabled:bg-gray-700 disabled:cursor-not-allowed text-white font-medium rounded-lg border border-white/10"
+          >
+            {isExporting ? 'Rendering…' : 'Preview render'}
+          </button>
+
+          <button
+            onClick={() => runRender('export')}
+            disabled={duration === 0 || !videoId || isExporting || hasLocalOnlyClips}
+            className="flex-1 py-3 bg-green-600 hover:bg-green-500 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-medium rounded-lg flex items-center justify-center gap-2"
           >
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
             </svg>
-            Export Video
+            {isExporting ? 'Rendering…' : 'Export'}
           </button>
-        )}
+        </div>
       </div>
     </div>
   )

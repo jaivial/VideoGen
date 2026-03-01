@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { useSelectedClips } from '../../../stores/editorStore'
+import { useEffect, useMemo, useState } from 'react'
+import { useEditorStore, useSelectedClips, useTracks } from '../../../stores/editorStore'
 
 const FILTERS = [
   { id: 'brightness', name: 'Brightness', min: -100, max: 100, default: 0 },
@@ -7,7 +7,7 @@ const FILTERS = [
   { id: 'saturation', name: 'Saturation', min: -100, max: 100, default: 0 },
   { id: 'temperature', name: 'Temperature', min: -100, max: 100, default: 0 },
   { id: 'blur', name: 'Blur', min: 0, max: 20, default: 0 },
-]
+] as const
 
 const TRANSITIONS = [
   { id: 'fade', name: 'Fade', icon: '◐' },
@@ -20,24 +20,155 @@ const TRANSITIONS = [
 
 export function EffectsPanel() {
   const selectedClips = useSelectedClips()
+  const tracks = useTracks()
+  const { updateClip } = useEditorStore()
   const [activeTab, setActiveTab] = useState<'filters' | 'transitions'>('filters')
   const [filterValues, setFilterValues] = useState<Record<string, number>>({})
+
+  const selectedClip = useMemo(() => {
+    if (selectedClips.length === 0) return null
+    const selectedId = selectedClips[0]
+    for (const track of tracks) {
+      const clip = track.clips.find((candidate) => candidate.id === selectedId)
+      if (clip) return clip
+    }
+    return null
+  }, [selectedClips, tracks])
+
+  const canApplyFilters = selectedClip !== null && (selectedClip.type === 'video' || selectedClip.type === 'image')
+  const canApplyTransitions = canApplyFilters
+
+  const currentTransition = useMemo(() => {
+    if (!selectedClip || !canApplyTransitions) return null
+    const effects = Array.isArray((selectedClip as any).effects) ? (selectedClip as any).effects : []
+    return effects.find((effect: any) => effect?.type === 'transition') || null
+  }, [selectedClip, canApplyTransitions])
+
+  const transitionStyle = useMemo(() => {
+    const style = String(currentTransition?.params?.style || '').trim()
+    return style || 'fade'
+  }, [currentTransition])
+
+  const transitionDuration = useMemo(() => {
+    const duration = Number(currentTransition?.params?.duration)
+    return Number.isFinite(duration) ? Math.max(0, duration) : 0
+  }, [currentTransition])
+
+  useEffect(() => {
+    if (!selectedClip || !canApplyFilters) {
+      setFilterValues({})
+      return
+    }
+
+    const currentValues: Record<string, number> = {}
+    const effects = Array.isArray((selectedClip as any).effects) ? (selectedClip as any).effects : []
+    for (const filter of FILTERS) {
+      const effect = effects.find((candidate: any) => candidate?.type === filter.id)
+      const value = Number(effect?.params?.value)
+      currentValues[filter.id] = Number.isFinite(value) ? value : filter.default
+    }
+    setFilterValues(currentValues)
+  }, [selectedClip, canApplyFilters])
 
   const handleFilterChange = (filterId: string, value: number) => {
     setFilterValues((prev) => ({ ...prev, [filterId]: value }))
 
-    // Apply to selected clip if any
-    if (selectedClips.length > 0) {
-      const clipId = selectedClips[0]
-      // In a real implementation, this would update the clip's effects
-      console.log('Applying filter:', filterId, value, 'to clip:', clipId)
+    if (!selectedClip || !canApplyFilters) {
+      return
     }
+
+    const effects = Array.isArray((selectedClip as any).effects) ? [...(selectedClip as any).effects] : []
+    const defaultValue = FILTERS.find((filter) => filter.id === filterId)?.default ?? 0
+    const effectIndex = effects.findIndex((effect: any) => effect?.type === filterId)
+
+    if (value === defaultValue) {
+      if (effectIndex !== -1) effects.splice(effectIndex, 1)
+      updateClip(selectedClip.id, { effects } as any)
+      return
+    }
+
+    const effectPayload = {
+      id: effectIndex !== -1 ? effects[effectIndex].id : `${filterId}-${selectedClip.id}`,
+      type: filterId,
+      name: FILTERS.find((filter) => filter.id === filterId)?.name || filterId,
+      enabled: true,
+      params: { value },
+    }
+
+    if (effectIndex !== -1) {
+      effects[effectIndex] = effectPayload
+    } else {
+      effects.push(effectPayload)
+    }
+
+    updateClip(selectedClip.id, { effects } as any)
   }
 
   const handleTransitionSelect = (transitionId: string) => {
-    if (selectedClips.length > 0) {
-      console.log('Applying transition:', transitionId, 'to clip:', selectedClips[0])
+    if (!selectedClip || !canApplyTransitions) return
+
+    const effects = Array.isArray((selectedClip as any).effects) ? [...(selectedClip as any).effects] : []
+    const idx = effects.findIndex((effect: any) => effect?.type === 'transition')
+    const transitionEffect = {
+      id: idx !== -1 ? effects[idx].id : `transition-${selectedClip.id}`,
+      type: 'transition',
+      name: 'Transition',
+      enabled: true,
+      params: {
+        style: transitionId,
+        duration: transitionDuration > 0 ? transitionDuration : 0.5,
+      },
     }
+    if (idx !== -1) {
+      effects[idx] = transitionEffect
+    } else {
+      effects.push(transitionEffect)
+    }
+    updateClip(selectedClip.id, { effects } as any)
+  }
+
+  const handleTransitionDurationChange = (duration: number) => {
+    if (!selectedClip || !canApplyTransitions) return
+
+    const effects = Array.isArray((selectedClip as any).effects) ? [...(selectedClip as any).effects] : []
+    const idx = effects.findIndex((effect: any) => effect?.type === 'transition')
+
+    if (duration <= 0.01) {
+      if (idx !== -1) effects.splice(idx, 1)
+      updateClip(selectedClip.id, { effects } as any)
+      return
+    }
+
+    const transitionEffect = {
+      id: idx !== -1 ? effects[idx].id : `transition-${selectedClip.id}`,
+      type: 'transition',
+      name: 'Transition',
+      enabled: true,
+      params: {
+        style: transitionStyle,
+        duration,
+      },
+    }
+    if (idx !== -1) {
+      effects[idx] = transitionEffect
+    } else {
+      effects.push(transitionEffect)
+    }
+    updateClip(selectedClip.id, { effects } as any)
+  }
+
+  const handleResetFilters = () => {
+    if (!selectedClip || !canApplyFilters) return
+    const resetValues: Record<string, number> = {}
+    for (const filter of FILTERS) {
+      resetValues[filter.id] = filter.default
+    }
+    setFilterValues(resetValues)
+
+    const effects = Array.isArray((selectedClip as any).effects) ? [...(selectedClip as any).effects] : []
+    const effectIds = new Set(FILTERS.map((filter) => filter.id))
+    const remaining = effects.filter((effect: any) => !effectIds.has(effect?.type))
+    updateClip(selectedClip.id, { effects: remaining } as any)
   }
 
   return (
@@ -76,6 +207,11 @@ export function EffectsPanel() {
                 <p className="text-yellow-400 text-xs">Select a clip to apply filters</p>
               </div>
             )}
+            {selectedClip && !canApplyFilters && (
+              <div className="mb-4 p-3 bg-amber-900/30 border border-amber-700 rounded-lg">
+                <p className="text-amber-300 text-xs">Filters can only be applied to video or image clips.</p>
+              </div>
+            )}
 
             {/* Filter sliders */}
             <div className="space-y-4">
@@ -93,7 +229,7 @@ export function EffectsPanel() {
                     max={filter.max}
                     value={filterValues[filter.id] ?? filter.default}
                     onChange={(e) => handleFilterChange(filter.id, parseInt(e.target.value))}
-                    disabled={selectedClips.length === 0}
+                    disabled={!canApplyFilters}
                     className="w-full h-1.5 bg-gray-700 rounded-lg appearance-none cursor-pointer disabled:opacity-50"
                   />
                 </div>
@@ -101,9 +237,9 @@ export function EffectsPanel() {
             </div>
 
             {/* Reset button */}
-            {selectedClips.length > 0 && (
+            {canApplyFilters && (
               <button
-                onClick={() => setFilterValues({})}
+                onClick={handleResetFilters}
                 className="mt-4 w-full py-2 text-sm text-gray-400 hover:text-white border border-gray-700 rounded-lg hover:border-gray-500"
               >
                 Reset Filters
@@ -118,6 +254,11 @@ export function EffectsPanel() {
                 <p className="text-yellow-400 text-xs">Select a clip to add transitions</p>
               </div>
             )}
+            {selectedClip && !canApplyTransitions && (
+              <div className="mb-4 p-3 bg-amber-900/30 border border-amber-700 rounded-lg">
+                <p className="text-amber-300 text-xs">Transitions can only be applied to video or image clips.</p>
+              </div>
+            )}
 
             {/* Transition grid */}
             <div className="grid grid-cols-2 gap-2">
@@ -125,14 +266,42 @@ export function EffectsPanel() {
                 <button
                   key={transition.id}
                   onClick={() => handleTransitionSelect(transition.id)}
-                  disabled={selectedClips.length === 0}
-                  className="p-4 bg-gray-800 hover:bg-gray-700 rounded-lg text-center disabled:opacity-50 disabled:cursor-not-allowed"
+                  disabled={!canApplyTransitions}
+                  className={`p-4 rounded-lg text-center disabled:opacity-50 disabled:cursor-not-allowed ${
+                    currentTransition && transitionStyle === transition.id
+                      ? 'bg-cyan-600/30 border border-cyan-400/70'
+                      : 'bg-gray-800 hover:bg-gray-700'
+                  }`}
                 >
                   <span className="text-2xl block mb-1">{transition.icon}</span>
                   <span className="text-xs text-gray-400">{transition.name}</span>
                 </button>
               ))}
             </div>
+
+            {canApplyTransitions && (
+              <div className="mt-4 space-y-3">
+                <div>
+                  <div className="flex justify-between mb-1">
+                    <label className="text-xs text-gray-400">Transition Duration</label>
+                    <span className="text-xs text-gray-500">{transitionDuration.toFixed(2)}s</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={2}
+                    step={0.05}
+                    value={transitionDuration}
+                    onChange={(e) => handleTransitionDurationChange(parseFloat(e.target.value))}
+                    className="w-full h-1.5 bg-gray-700 rounded-lg appearance-none cursor-pointer"
+                  />
+                  <div className="flex justify-between text-[10px] text-gray-600 mt-1">
+                    <span>0s</span>
+                    <span>2s</span>
+                  </div>
+                </div>
+              </div>
+            )}
           </>
         )}
       </div>

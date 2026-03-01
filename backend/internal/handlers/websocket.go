@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
 )
 
@@ -27,19 +29,36 @@ type WSMessage struct {
 	ElementStatus string      `json:"element_status,omitempty"`
 }
 
+type wsClient struct {
+	conn     *websocket.Conn
+	writeMux sync.Mutex
+}
+
+func (c *wsClient) writeText(data []byte) error {
+	c.writeMux.Lock()
+	defer c.writeMux.Unlock()
+	return c.conn.WriteMessage(websocket.TextMessage, data)
+}
+
+func (c *wsClient) writeJSON(v interface{}) error {
+	c.writeMux.Lock()
+	defer c.writeMux.Unlock()
+	return c.conn.WriteJSON(v)
+}
+
 // WebSocketHandler manages WebSocket connections for video progress updates
 type WebSocketHandler struct {
-	clients    map[uint64]*websocket.Conn
-	clientsMux sync.RWMutex
-	allClients map[*websocket.Conn]bool
+	clients       map[uint64]map[*wsClient]struct{}
+	clientsMux    sync.RWMutex
+	allClients    map[*wsClient]struct{}
 	allClientsMux sync.RWMutex
 	upgrader   websocket.Upgrader
 }
 
 func NewWebSocketHandler() *WebSocketHandler {
 	return &WebSocketHandler{
-		clients:    make(map[uint64]*websocket.Conn),
-		allClients: make(map[*websocket.Conn]bool),
+		clients:    make(map[uint64]map[*wsClient]struct{}),
+		allClients: make(map[*wsClient]struct{}),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				return true // Allow all origins in dev
@@ -49,42 +68,47 @@ func NewWebSocketHandler() *WebSocketHandler {
 }
 
 func (h *WebSocketHandler) HandleVideoProgress(videoID uint64) {
-	h.clientsMux.RLock()
-	conn, exists := h.clients[videoID]
-	h.clientsMux.RUnlock()
-
-	if !exists || conn == nil {
-		return
-	}
-
 	// Connection already registered for this video
 }
 
-func (h *WebSocketHandler) RegisterConnection(videoID uint64, conn *websocket.Conn) {
+func (h *WebSocketHandler) RegisterVideoConnection(videoID uint64, conn *websocket.Conn) *wsClient {
+	client := &wsClient{conn: conn}
+
 	h.clientsMux.Lock()
-	h.clients[videoID] = conn
+	if _, ok := h.clients[videoID]; !ok {
+		h.clients[videoID] = make(map[*wsClient]struct{})
+	}
+	h.clients[videoID][client] = struct{}{}
 	h.clientsMux.Unlock()
 
-	// Also register in all clients for logs broadcasting
-	h.allClientsMux.Lock()
-	h.allClients[conn] = true
-	h.allClientsMux.Unlock()
+	return client
 }
 
-func (h *WebSocketHandler) UnregisterConnection(videoID uint64) {
+func (h *WebSocketHandler) RegisterAllConnection(conn *websocket.Conn) *wsClient {
+	client := &wsClient{conn: conn}
+
+	h.allClientsMux.Lock()
+	h.allClients[client] = struct{}{}
+	h.allClientsMux.Unlock()
+
+	return client
+}
+
+func (h *WebSocketHandler) UnregisterVideoConnection(videoID uint64, client *wsClient) {
 	h.clientsMux.Lock()
-	conn, exists := h.clients[videoID]
-	if exists {
-		delete(h.clients, videoID)
+	if videoClients, ok := h.clients[videoID]; ok {
+		delete(videoClients, client)
+		if len(videoClients) == 0 {
+			delete(h.clients, videoID)
+		}
 	}
 	h.clientsMux.Unlock()
+}
 
-	// Remove from all clients
-	if conn != nil {
-		h.allClientsMux.Lock()
-		delete(h.allClients, conn)
-		h.allClientsMux.Unlock()
-	}
+func (h *WebSocketHandler) UnregisterAllConnection(client *wsClient) {
+	h.allClientsMux.Lock()
+	delete(h.allClients, client)
+	h.allClientsMux.Unlock()
 }
 
 // BroadcastToAll sends a message to ALL connected clients (for logs page)
@@ -96,42 +120,63 @@ func (h *WebSocketHandler) BroadcastToAll(msg WSMessage) {
 	}
 
 	h.allClientsMux.RLock()
-	defer h.allClientsMux.RUnlock()
+	clients := make([]*wsClient, 0, len(h.allClients))
+	for client := range h.allClients {
+		clients = append(clients, client)
+	}
+	h.allClientsMux.RUnlock()
 
-	for conn := range h.allClients {
-		if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+	for _, client := range clients {
+		if err := client.writeText(data); err != nil {
 			log.Printf("Failed to write WS message to client: %v", err)
-			conn.Close()
-			delete(h.allClients, conn)
+			client.conn.Close()
+			h.UnregisterAllConnection(client)
 		}
 	}
 }
 
 func (h *WebSocketHandler) SendToVideo(videoID uint64, msg WSMessage) {
-	h.clientsMux.RLock()
-	conn, exists := h.clients[videoID]
-	h.clientsMux.RUnlock()
-
-	if !exists || conn == nil {
-		return
-	}
-
 	data, err := json.Marshal(msg)
 	if err != nil {
 		log.Printf("Failed to marshal WS message: %v", err)
 		return
 	}
 
-	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
-		log.Printf("Failed to write WS message: %v", err)
-		conn.Close()
-		h.UnregisterConnection(videoID)
+	h.clientsMux.RLock()
+	videoClients, ok := h.clients[videoID]
+	if !ok || len(videoClients) == 0 {
+		h.clientsMux.RUnlock()
+		return
+	}
+
+	clients := make([]*wsClient, 0, len(videoClients))
+	for client := range videoClients {
+		clients = append(clients, client)
+	}
+	h.clientsMux.RUnlock()
+
+	for _, client := range clients {
+		if err := client.writeText(data); err != nil {
+			log.Printf("Failed to write WS message: %v", err)
+			client.conn.Close()
+			h.UnregisterVideoConnection(videoID, client)
+		}
 	}
 }
 
 func (h *WebSocketHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Get video ID from URL
-	// This would need proper auth in production
+	idStr := chi.URLParam(r, "id")
+	if idStr == "" {
+		http.Error(w, "Missing video id", http.StatusBadRequest)
+		return
+	}
+
+	videoID, err := strconv.ParseUint(idStr, 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid video id", http.StatusBadRequest)
+		return
+	}
 
 	conn, err := h.upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -139,7 +184,19 @@ func (h *WebSocketHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	defer conn.Close()
+	client := h.RegisterVideoConnection(videoID, conn)
+	defer func() {
+		h.UnregisterVideoConnection(videoID, client)
+		conn.Close()
+	}()
+
+	// Acknowledge connection
+	_ = client.writeJSON(WSMessage{
+		Type:      "connected",
+		VideoID:   videoID,
+		Timestamp: time.Now().Format(time.RFC3339),
+		Message:   "WebSocket connected",
+	})
 
 	// Handle connection
 	for {
@@ -158,7 +215,7 @@ func (h *WebSocketHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if msg.Type == "ping" {
-			conn.WriteJSON(WSMessage{Type: "pong"})
+			_ = client.writeJSON(WSMessage{Type: "pong"})
 		}
 	}
 }
@@ -172,6 +229,11 @@ func (h *WebSocketHandler) BroadcastPhase(videoID uint64, phase string, progress
 		Phase:     phase,
 		Progress:  progress,
 		Message:   message,
+		Payload: map[string]interface{}{
+			"phase":    phase,
+			"progress": progress,
+			"message":  message,
+		},
 	})
 }
 
@@ -185,6 +247,12 @@ func (h *WebSocketHandler) BroadcastStep(videoID uint64, phase, step string, pro
 		Step:      step,
 		Progress:  progress,
 		Message:   message,
+		Payload: map[string]interface{}{
+			"phase":    phase,
+			"step":     step,
+			"progress": progress,
+			"message":  message,
+		},
 	}
 	h.SendToVideo(videoID, msg)
 	h.BroadcastToAll(msg)
@@ -200,6 +268,12 @@ func (h *WebSocketHandler) BroadcastError(videoID uint64, phase, step, errorMsg 
 		Step:      step,
 		Error:     errorMsg,
 		Message:   errorMsg,
+		Payload: map[string]interface{}{
+			"phase":   phase,
+			"step":    step,
+			"message": errorMsg,
+			"error":   errorMsg,
+		},
 	}
 	h.SendToVideo(videoID, msg)
 	h.BroadcastToAll(msg)

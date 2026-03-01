@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api, connectWebSocket } from '../../api'
 
@@ -37,6 +37,8 @@ interface VideoStatus {
   id: number
   phase_of_generation: string
   progress: number
+  step?: string
+  message?: string
   download_url?: string
   downloaded?: boolean
   download_expires_at?: string
@@ -171,6 +173,15 @@ export default function Generate() {
     goToStep(4)
 
     try {
+      if (wsRef.current) {
+        wsRef.current.close()
+        wsRef.current = null
+      }
+      if (completionTimeoutRef.current) {
+        clearTimeout(completionTimeoutRef.current)
+        completionTimeoutRef.current = null
+      }
+
       const result = await api.generateVideo({
         transcribed_text: transcribedText,
         output_language: language,
@@ -182,38 +193,42 @@ export default function Generate() {
 
       // Connect WebSocket
       const ws = connectWebSocket(String(videoId), (data) => {
-        if (data.type === 'phase_update') {
+        const payload = data?.payload || {}
+
+        if (data.type === 'step_update' || data.type === 'phase_update') {
           setStatus({
             id: videoId,
-            phase_of_generation: data.payload.phase,
-            progress: data.payload.progress,
+            phase_of_generation: payload.phase ?? data.phase ?? 'pending',
+            progress: Number(payload.progress ?? data.progress ?? 0),
+            step: payload.step ?? data.step,
+            message: payload.message ?? data.message,
           })
-        } else if (data.type === 'completed') {
+        } else if (data.type === 'completed' || (data.type === 'phase_update' && (payload.phase ?? data.phase) === 'completed')) {
           setStatus({
             id: videoId,
             phase_of_generation: 'completed',
             progress: 100,
-            download_url: data.payload.download_url,
+            download_url: payload.download_url,
+            message: payload.message ?? data.message,
           })
           // 3-second autofill before completing
           completionTimeoutRef.current = setTimeout(() => {
             goToStep(5)
           }, 3000)
         } else if (data.type === 'error') {
-          setError(data.payload.message)
+          const errorMsg = payload.message ?? payload.error ?? data.message ?? data.error ?? 'Generation failed'
+          setError(errorMsg)
           setStatus({
             id: videoId,
             phase_of_generation: 'error',
             progress: 0,
-            error: data.payload.message,
+            error: errorMsg,
+            message: errorMsg,
           })
         }
       })
 
       wsRef.current = ws
-
-      // Also poll for status
-      pollStatus(String(videoId))
 
     } catch (err: any) {
       setError(err.message || 'Failed to start generation')
@@ -221,20 +236,6 @@ export default function Generate() {
     } finally {
       setLoading(false)
     }
-  }
-
-  const pollStatus = async (videoId: string) => {
-    const interval = setInterval(async () => {
-      try {
-        const s = await api.getVideoStatus(videoId)
-        setStatus(s)
-        if (s.phase_of_generation === 'completed' || s.phase_of_generation === 'error') {
-          clearInterval(interval)
-        }
-      } catch (err) {
-        console.error('Status poll error:', err)
-      }
-    }, 2000)
   }
 
   const handleDownload = async (videoId: number) => {
@@ -304,6 +305,10 @@ export default function Generate() {
   }
 
   const startAnotherVideo = () => {
+    if (wsRef.current) {
+      wsRef.current.close()
+      wsRef.current = null
+    }
     setCurrentStep(1)
     setTranscribedText('')
     setLanguage('en')
@@ -656,16 +661,21 @@ export default function Generate() {
   )
 }
 
-// Loading Step Component with animated circle and bubbles
+// Loading Step Component with unified progress bar + particles
 function LoadingStep({ status, colors, error }: { status: VideoStatus | null; colors: any; error: string }) {
-  const [progress, setProgress] = useState(0)
-  const circleRef = useRef<SVGCircleElement>(null)
+  const [fallbackProgress, setFallbackProgress] = useState(0)
+  const isDoneRef = useRef(false)
+
+  useEffect(() => {
+    isDoneRef.current = status?.phase_of_generation === 'completed' || status?.phase_of_generation === 'error'
+  }, [status?.phase_of_generation])
 
   // Animation logic: 0-50% in 30 seconds, 50-100% in 120 seconds
   useEffect(() => {
     const startTime = Date.now()
     const duration1 = 30000 // 30 seconds for 0-50%
     const duration2 = 120000 // 120 seconds for 50-100%
+    let rafId = 0
 
     const animate = () => {
       const elapsed = Date.now() - startTime
@@ -681,80 +691,61 @@ function LoadingStep({ status, colors, error }: { status: VideoStatus | null; co
       }
 
       // Cap at 99% until actual completion
-      const displayProgress = status?.phase_of_generation === 'completed' ? 100 : Math.min(newProgress, 99)
-      setProgress(displayProgress)
+      const displayProgress = Math.min(newProgress, 99)
+      setFallbackProgress(displayProgress)
 
-      if (displayProgress < 100) {
-        requestAnimationFrame(animate)
+      if (displayProgress < 99 && !isDoneRef.current) {
+        rafId = requestAnimationFrame(animate)
       }
     }
 
-    requestAnimationFrame(animate)
-  }, [status?.phase_of_generation])
+    rafId = requestAnimationFrame(animate)
 
-  // Update progress based on actual status
-  useEffect(() => {
-    if (status) {
-      const phaseProgress = getPhaseProgress(status.phase_of_generation)
-      if (phaseProgress > progress && phaseProgress <= 100) {
-        setProgress(phaseProgress)
-      }
-    }
-  }, [status?.phase_of_generation])
+    return () => cancelAnimationFrame(rafId)
+  }, [])
 
-  const circumference = 2 * Math.PI * 45
-  const strokeDashoffset = circumference - (progress / 100) * circumference
+  const statusProgress = status?.progress ?? (status ? getPhaseProgress(status.phase_of_generation) : 0)
+  const progress =
+    status?.phase_of_generation === 'completed'
+      ? 100
+      : Math.min(Math.max(statusProgress, fallbackProgress), 99)
 
   return (
     <div className="text-center">
-      {/* Animated Circle */}
-      <div className="relative w-40 h-40 mx-auto mb-6">
-        <svg className="w-full h-full transform -rotate-90">
-          {/* Background circle */}
-          <circle
-            cx="80"
-            cy="80"
-            r="45"
-            fill="none"
-            stroke={colors.border}
-            strokeWidth="8"
-          />
-          {/* Progress circle */}
-          <circle
-            ref={circleRef}
-            cx="80"
-            cy="80"
-            r="45"
-            fill="none"
-            stroke={colors.primary}
-            strokeWidth="8"
-            strokeLinecap="round"
-            strokeDasharray={circumference}
-            strokeDashoffset={strokeDashoffset}
-            className="transition-all duration-300 ease-linear"
-          />
-        </svg>
-        {/* Percentage in center */}
-        <div className="absolute inset-0 flex items-center justify-center">
-          <span className="text-2xl font-bold" style={{ color: colors.text }}>
+      <div className="max-w-md mx-auto">
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-sm font-medium" style={{ color: colors.textSecondary }}>
+            {status ? getPhaseLabel(status.phase_of_generation) : 'Starting'}
+          </span>
+          <span className="text-sm font-semibold" style={{ color: colors.text }}>
             {Math.round(progress)}%
           </span>
         </div>
+
+        {/* Unified progress graph */}
+        <div className="h-4 rounded-full overflow-hidden" style={{ backgroundColor: colors.border }}>
+          <div
+            className="h-full rounded-full relative overflow-hidden transition-[width] duration-500 ease-out"
+            style={{
+              width: `${progress}%`,
+              background: `linear-gradient(90deg, ${colors.primary}, ${colors.accent})`,
+            }}
+          >
+            <LoadingBarParticles colors={colors} />
+          </div>
+        </div>
+
+        {/* Status message */}
+        {status?.message && (
+          <p className="text-sm mt-4" style={{ color: colors.textSecondary }}>
+            {status.message}
+          </p>
+        )}
       </div>
-
-      {/* Bubble Particles */}
-      <BubbleParticles colors={colors} />
-
-      {/* Phase Label */}
-      {status && (
-        <p className="text-lg mb-4" style={{ color: colors.textSecondary }}>
-          {getPhaseLabel(status.phase_of_generation)}
-        </p>
-      )}
 
       {/* Error Display */}
       {error && (
-        <p className="text-sm" style={{ color: colors.error }}>
+        <p className="text-sm mt-3" style={{ color: colors.error }}>
           {error}
         </p>
       )}
@@ -762,30 +753,58 @@ function LoadingStep({ status, colors, error }: { status: VideoStatus | null; co
   )
 }
 
-// Bubble particles component
-function BubbleParticles({ colors }: { colors: any }) {
-  const bubbles = Array.from({ length: 12 }, (_, i) => ({
-    id: i,
-    size: Math.random() * 12 + 6,
-    left: Math.random() * 100,
-    delay: Math.random() * 5,
-    duration: Math.random() * 3 + 4,
-  }))
+function LoadingBarParticles({ colors }: { colors: any }) {
+  const particles = useMemo(
+    () => ({
+      bubbles: Array.from({ length: 10 }, (_, i) => ({
+        id: i,
+        size: Math.random() * 10 + 4,
+        left: Math.random() * 100,
+        delay: Math.random() * 3,
+        duration: Math.random() * 2 + 2.5,
+      })),
+      sparkles: Array.from({ length: 8 }, (_, i) => ({
+        id: i,
+        top: Math.random() * 100,
+        left: Math.random() * 100,
+        delay: Math.random() * 2.5,
+        duration: Math.random() * 1.8 + 1.2,
+      })),
+    }),
+    []
+  )
 
   return (
-    <div className="absolute inset-0 overflow-hidden pointer-events-none">
-      {bubbles.map((bubble) => (
+    <div className="absolute inset-0 pointer-events-none">
+      {particles.bubbles.map((bubble) => (
         <div
           key={bubble.id}
-          className="absolute rounded-full opacity-30"
+          className="absolute rounded-full opacity-25"
           style={{
             width: bubble.size,
             height: bubble.size,
             left: `${bubble.left}%`,
-            bottom: '-20px',
-            backgroundColor: colors.primary,
-            animation: `floatUp ${bubble.duration}s ease-in-out infinite`,
+            bottom: '-10px',
+            backgroundColor: '#fff',
+            animation: `barFloat ${bubble.duration}s ease-in-out infinite`,
             animationDelay: `${bubble.delay}s`,
+          }}
+        />
+      ))}
+
+      {particles.sparkles.map((sparkle) => (
+        <div
+          key={`s-${sparkle.id}`}
+          className="absolute"
+          style={{
+            width: 3,
+            height: 3,
+            top: `${sparkle.top}%`,
+            left: `${sparkle.left}%`,
+            borderRadius: 9999,
+            backgroundColor: 'rgba(255, 255, 255, 0.9)',
+            animation: `barSparkle ${sparkle.duration}s ease-in-out infinite`,
+            animationDelay: `${sparkle.delay}s`,
           }}
         />
       ))}

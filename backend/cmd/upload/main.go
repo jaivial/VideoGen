@@ -5,15 +5,11 @@ import (
 	"log"
 	"os"
 
-	"github.com/joho/godotenv"
 	"video-generator/internal/config"
 	"video-generator/internal/services"
 )
 
 func main() {
-	// Load .env
-	godotenv.Load("/root/video-generator/.env")
-
 	cfg := config.Load()
 	bunny := services.NewBunnyService(cfg)
 

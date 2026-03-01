@@ -99,6 +99,24 @@ export const api = {
 
   getVideoAssets: (videoId: string) =>
     fetchAPI(`/api/editor/video/${videoId}/assets`),
+
+  renderEditedVideo: async (videoId: string, data: any) => {
+    const response = await fetch(`${API_URL}/api/editor/video/${videoId}/render`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(data),
+    })
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => '')
+      throw new Error(text || 'Render failed')
+    }
+
+    return response.blob()
+  },
 }
 
 export function connectWebSocket(videoId: string, onMessage: (data: any) => void) {

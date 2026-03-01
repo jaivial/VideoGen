@@ -1,13 +1,14 @@
 import { useEffect, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { api } from '../../api'
-import { Editor } from '../../components/editor'
+import { Editor, type EditorInitialAssets } from '../../components/editor/Editor'
 
 export default function EditorPage() {
   const { videoId } = useParams<{ videoId: string }>()
   const navigate = useNavigate()
   const [loading, setLoading] = useState(true)
   const [videoUrl, setVideoUrl] = useState<string | null>(null)
+  const [initialAssets, setInitialAssets] = useState<EditorInitialAssets | undefined>(undefined)
   const [duration] = useState(0)
   const [error, setError] = useState<string | null>(null)
 
@@ -26,14 +27,53 @@ export default function EditorPage() {
 
       try {
         setLoading(true)
-        const status = await api.getVideoStatus(videoId)
+        setError(null)
 
+        const assets = await api.getVideoAssets(videoId).catch(() => null)
+
+        if (assets?.download_url) {
+          const imageUrls = Array.isArray(assets.image_urls)
+            ? assets.image_urls.filter((url: unknown) => typeof url === 'string')
+            : []
+          const imageSegments = Array.isArray(assets.image_segments)
+            ? assets.image_segments
+            : []
+          const audioSegments = Array.isArray(assets.audio_segments)
+            ? assets.audio_segments
+            : []
+          const translatedLines = Array.isArray(assets.translated_lines)
+            ? assets.translated_lines.filter((line: unknown) => typeof line === 'string')
+            : []
+          const captionSegments = Array.isArray(assets.caption_segments)
+            ? assets.caption_segments
+            : []
+          const transcriptionChunks = Array.isArray(assets.transcription_chunks)
+            ? assets.transcription_chunks
+            : []
+
+          setVideoUrl(assets.download_url)
+          setInitialAssets({
+            downloadUrl: assets.download_url,
+            audioUrl: typeof assets.audio_url === 'string' ? assets.audio_url : assets.download_url,
+            imageUrls,
+            imageSegments,
+            audioSegments,
+            translatedLines,
+            captionSegments,
+            transcriptionChunks,
+            transcribedText: typeof assets.transcribed_text === 'string' ? assets.transcribed_text : '',
+          })
+          return
+        }
+
+        const status = await api.getVideoStatus(videoId)
         if (status.download_url) {
           setVideoUrl(status.download_url)
-          // Duration will be set when the video loads in the editor
-        } else {
-          setError('Video not found')
+          setInitialAssets(undefined)
+          return
         }
+
+        setError('Video not found')
       } catch (err: any) {
         setError(err.message || 'Failed to load video')
       } finally {
@@ -74,5 +114,12 @@ export default function EditorPage() {
     )
   }
 
-  return <Editor videoUrl={videoUrl || undefined} videoDuration={duration} />
+  return (
+    <Editor
+      videoId={videoId}
+      videoUrl={videoUrl || undefined}
+      videoDuration={duration}
+      initialAssets={initialAssets}
+    />
+  )
 }

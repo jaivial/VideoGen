@@ -3,16 +3,24 @@ interface PlayheadProps {
   zoom: number
   scrollX: number
   isDragging: boolean
+  trackHeaderWidth?: number
   onMouseDown: (e: React.MouseEvent) => void
 }
 
-export function Playhead({ currentTime, zoom, scrollX, isDragging, onMouseDown }: PlayheadProps) {
+export function Playhead({
+  currentTime,
+  zoom,
+  scrollX,
+  isDragging,
+  trackHeaderWidth = 144,
+  onMouseDown,
+}: PlayheadProps) {
   const position = currentTime * zoom - scrollX
 
   return (
     <div
-      className={`absolute top-0 bottom-0 z-30 cursor-ew-resize ${isDragging ? 'z-40' : ''}`}
-      style={{ left: position + 150 }} // 150px offset for track headers
+      className={`absolute top-0 bottom-0 z-30 cursor-ew-resize group ${isDragging ? 'z-40' : ''}`}
+      style={{ left: position + trackHeaderWidth }}
       onMouseDown={onMouseDown}
     >
       {/* Playhead line */}

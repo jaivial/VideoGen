@@ -4,8 +4,10 @@ import { Track } from './Track'
 import { TimeRuler } from './TimeRuler'
 import { Playhead } from './Playhead'
 
+const TRACK_HEADER_WIDTH = 176
+
 export function Timeline() {
-  const timelineRef = useRef<HTMLDivElement>(null)
+  const scrollContainerRef = useRef<HTMLDivElement>(null)
   const [isDraggingPlayhead, setIsDraggingPlayhead] = useState(false)
 
   const tracks = useTracks()
@@ -16,7 +18,8 @@ export function Timeline() {
   const { setCurrentTime, setZoom, setScrollX, scrollX } = useEditorStore()
 
   // Calculate timeline width
-  const timelineWidth = Math.max(duration * zoom + 200, 800)
+  const timelineContentWidth = Math.max(duration * zoom + 200, 800)
+  const timelineWidth = timelineContentWidth + TRACK_HEADER_WIDTH
 
   // Handle zoom with mouse wheel
   const handleWheel = useCallback((e: React.WheelEvent) => {
@@ -24,10 +27,18 @@ export function Timeline() {
       e.preventDefault()
       const delta = e.deltaY > 0 ? -5 : 5
       setZoom(zoom + delta)
-    } else {
-      // Horizontal scroll
-      const newScrollX = Math.max(0, scrollX + e.deltaX + e.deltaY)
-      setScrollX(newScrollX)
+      return
+    }
+
+    // Horizontal scroll (trackpads / shift+wheel)
+    const wantsHorizontal = e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)
+    if (!wantsHorizontal) return
+
+    e.preventDefault()
+    const next = Math.max(0, scrollX + (e.deltaX || e.deltaY))
+    setScrollX(next)
+    if (scrollContainerRef.current) {
+      scrollContainerRef.current.scrollLeft = next
     }
   }, [zoom, scrollX, setZoom, setScrollX])
 
@@ -42,7 +53,7 @@ export function Timeline() {
     if (isDraggingPlayhead) return
 
     const rect = e.currentTarget.getBoundingClientRect()
-    const x = e.clientX - rect.left + scrollX - 150 // 150px for track headers
+    const x = e.clientX - rect.left + scrollX
     const time = x / zoom
     setCurrentTime(Math.max(0, Math.min(time, duration)))
   }, [zoom, scrollX, duration, setCurrentTime, isDraggingPlayhead])
@@ -52,11 +63,11 @@ export function Timeline() {
     if (!isDraggingPlayhead) return
 
     const handleMouseMove = (e: MouseEvent) => {
-      const timeline = timelineRef.current
+      const timeline = scrollContainerRef.current
       if (!timeline) return
 
       const rect = timeline.getBoundingClientRect()
-      const x = e.clientX - rect.left + scrollX - 150
+      const x = e.clientX - rect.left + scrollX - TRACK_HEADER_WIDTH
       const time = x / zoom
       setCurrentTime(Math.max(0, Math.min(time, duration)))
     }
@@ -74,6 +85,15 @@ export function Timeline() {
     }
   }, [isDraggingPlayhead, zoom, scrollX, duration, setCurrentTime])
 
+  // Sync scrollX <-> scrollLeft
+  useEffect(() => {
+    const el = scrollContainerRef.current
+    if (!el) return
+    if (Math.abs(el.scrollLeft - scrollX) > 1) {
+      el.scrollLeft = scrollX
+    }
+  }, [scrollX])
+
   // Format time for display
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60)
@@ -90,7 +110,7 @@ export function Timeline() {
           <input
             type="range"
             min="10"
-            max="200"
+            max="150"
             value={zoom}
             onChange={(e) => setZoom(parseInt(e.target.value))}
             className="w-24 h-1 bg-gray-600 rounded-lg appearance-none cursor-pointer"
@@ -116,17 +136,21 @@ export function Timeline() {
 
       {/* Timeline content */}
       <div
-        ref={timelineRef}
+        ref={scrollContainerRef}
         className="flex-1 overflow-auto relative"
         onWheel={handleWheel}
+        onScroll={(e) => setScrollX((e.currentTarget as HTMLDivElement).scrollLeft)}
       >
         <div
-          className="relative min-h-full"
+          className="relative min-h-full flex"
           style={{ width: timelineWidth, minWidth: '100%' }}
-          onClick={handleTimelineClick}
         >
           {/* Track headers */}
-          <div className="sticky left-0 z-20 bg-gray-800 border-r border-gray-700">
+          <div
+            className="sticky left-0 z-20 bg-gray-800 border-r border-gray-700 shrink-0"
+            style={{ width: TRACK_HEADER_WIDTH }}
+          >
+            <div className="h-6 border-b border-gray-700" />
             {tracks.map((track) => (
               <div
                 key={track.id}
@@ -166,16 +190,22 @@ export function Timeline() {
             ))}
           </div>
 
-          {/* Time ruler */}
-          <div className="sticky top-0 z-10 h-6 bg-gray-800 border-b border-gray-700 ml-36">
-            <TimeRuler duration={duration} zoom={zoom} scrollX={scrollX} />
-          </div>
+          <div
+            className="relative"
+            style={{ width: timelineContentWidth }}
+            onClick={handleTimelineClick}
+          >
+            {/* Time ruler */}
+            <div className="sticky top-0 z-10 h-6 bg-gray-800 border-b border-gray-700">
+              <TimeRuler duration={duration} zoom={zoom} scrollX={scrollX} />
+            </div>
 
-          {/* Tracks area */}
-          <div className="ml-36" style={{ marginTop: -24 }}>
-            {tracks.map((track) => (
-              <Track key={track.id} track={track} />
-            ))}
+            {/* Tracks area */}
+            <div className="timeline-tracks">
+              {tracks.map((track) => (
+                <Track key={track.id} track={track} />
+              ))}
+            </div>
           </div>
 
           {/* Playhead */}
@@ -184,6 +214,7 @@ export function Timeline() {
             zoom={zoom}
             scrollX={scrollX}
             isDragging={isDraggingPlayhead}
+            trackHeaderWidth={TRACK_HEADER_WIDTH}
             onMouseDown={handlePlayheadMouseDown}
           />
         </div>

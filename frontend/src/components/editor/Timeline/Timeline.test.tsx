@@ -5,20 +5,15 @@ import { useEditorStore } from '../../../stores/editorStore'
 
 // Mock dnd-kit components
 vi.mock('@dnd-kit/core', () => ({
-  DndContext: ({ children }: { children: React.ReactNode }) => children,
   useDroppable: () => ({
     setNodeRef: vi.fn(),
     isOver: false,
   }),
-}))
-
-vi.mock('@dnd-kit/sortable', () => ({
-  useSortable: () => ({
+  useDraggable: () => ({
     attributes: {},
     listeners: {},
     setNodeRef: vi.fn(),
     transform: null,
-    transition: null,
     isDragging: false,
   }),
 }))
@@ -27,18 +22,16 @@ describe('Timeline', () => {
   beforeEach(() => {
     vi.clearAllMocks()
 
-    // Reset store state by calling actions directly (not setState)
-    const store = useEditorStore
-    const state = store.getState()
-
-    // Clear all tracks clips
-    state.tracks.forEach(track => {
-      while (track.clips.length > 0) {
-        state.removeClip(track.clips[0].id)
-      }
-    })
+    // Clear all tracks clips (must re-read state; immer updates create new objects)
+    while (true) {
+      const state = useEditorStore.getState()
+      const trackWithClip = state.tracks.find((t) => t.clips.length > 0)
+      if (!trackWithClip) break
+      state.removeClip(trackWithClip.clips[0].id)
+    }
 
     // Reset state values using actions
+    const state = useEditorStore.getState()
     state.setCurrentTime(0)
     state.setDuration(0)
     state.setZoom(50)

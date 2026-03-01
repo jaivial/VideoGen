@@ -75,15 +75,24 @@ type Broadcaster interface {
 }
 
 type VideoWorker struct {
-	db              *db.DB
-	ytService       *services.YouTubeService
-	waveSpeed       *services.WaveSpeedService
-	openRouter      *services.OpenRouterService
-	bunny           *services.BunnyService
-	videoProcessor  *services.VideoProcessor
-	broadcaster     Broadcaster
-	tempDir         string
-	cfg             *config.Config
+	db             *db.DB
+	ytService      *services.YouTubeService
+	waveSpeed      *services.WaveSpeedService
+	openRouter     *services.OpenRouterService
+	bunny          *services.BunnyService
+	videoProcessor *services.VideoProcessor
+	broadcaster    Broadcaster
+	tempDir        string
+	cfg            *config.Config
+}
+
+type editorTimedSegment struct {
+	Index    int     `json:"index,omitempty"`
+	URL      string  `json:"url,omitempty"`
+	Text     string  `json:"text,omitempty"`
+	Start    float64 `json:"start"`
+	End      float64 `json:"end"`
+	Duration float64 `json:"duration"`
 }
 
 func NewVideoWorker(
@@ -338,11 +347,11 @@ func (w *VideoWorker) ProcessVideo(videoRequestID, userID uint64, videoURL, tran
 		chunkStartTime := chunkStartRatio * totalOriginalDuration
 
 		seg := services.TranscriptSegment{
-			Index:           i,
-			OriginalText:    textChunks[i],
-			TranslatedText:  translatedText,
-			StartTime:       chunkStartTime,
-			Duration:        chunkDuration,
+			Index:          i,
+			OriginalText:   textChunks[i],
+			TranslatedText: translatedText,
+			StartTime:      chunkStartTime,
+			Duration:       chunkDuration,
 		}
 		translatedSegments = append(translatedSegments, seg)
 		originalTexts = append(originalTexts, textChunks[i])
@@ -529,9 +538,9 @@ func (w *VideoWorker) ProcessVideo(videoRequestID, userID uint64, videoURL, tran
 
 		// Store caption segments and metadata in a JSON file for composition
 		captionInfo := map[string]interface{}{
-			"audioPath":      audioPath,
-			"audioDuration":  audioDuration,
-			"chunkDuration":  chunkDuration,
+			"audioPath":       audioPath,
+			"audioDuration":   audioDuration,
+			"chunkDuration":   chunkDuration,
 			"captionSegments": captionSegments,
 		}
 		captionInfoJSON, _ := json.Marshal(captionInfo)
@@ -569,9 +578,9 @@ func (w *VideoWorker) ProcessVideo(videoRequestID, userID uint64, videoURL, tran
 	// Read caption info that was saved during audio generation
 	captionInfoPath := filepath.Join(videoDir, "caption_info.json")
 	var captionInfo struct {
-		AudioPath      string                    `json:"audioPath"`
-		AudioDuration  float64                   `json:"audioDuration"`
-		ChunkDuration  float64                   `json:"chunkDuration"`
+		AudioPath       string                    `json:"audioPath"`
+		AudioDuration   float64                   `json:"audioDuration"`
+		ChunkDuration   float64                   `json:"chunkDuration"`
 		CaptionSegments []services.CaptionSegment `json:"captionSegments"`
 	}
 
@@ -592,6 +601,18 @@ func (w *VideoWorker) ProcessVideo(videoRequestID, userID uint64, videoURL, tran
 		}
 	} else {
 		unifiedAudioData = []byte("PLACEHOLDER_AUDIO")
+	}
+
+	// Upload unified narration audio so the editor can load it as an independent track source.
+	audioAssetURL := ""
+	if len(unifiedAudioData) > 100 && string(unifiedAudioData) != "PLACEHOLDER_AUDIO" && w.bunny != nil {
+		audioFilename := fmt.Sprintf("%d_%d_unified.wav", videoRequestID, time.Now().Unix())
+		uploadedAudioURL, uploadAudioErr := w.bunny.UploadMedia(audioFilename, unifiedAudioData, "audio")
+		if uploadAudioErr != nil {
+			log.Printf("Warning: failed to upload editor audio asset: %v", uploadAudioErr)
+		} else {
+			audioAssetURL = uploadedAudioURL
+		}
 	}
 
 	// Update chunks with duration from audio
@@ -619,6 +640,146 @@ func (w *VideoWorker) ProcessVideo(videoRequestID, userID uint64, videoURL, tran
 		} else {
 			audios[i] = []byte("PLACEHOLDER_AUDIO")
 		}
+	}
+
+	// Build timeline metadata for the editor from Whisper captions and generated assets.
+	captionSegmentsForEditor := make([]editorTimedSegment, 0, len(captionInfo.CaptionSegments))
+	maxCaptionEnd := 0.0
+	for i, caption := range captionInfo.CaptionSegments {
+		text := strings.TrimSpace(caption.Text)
+		if text == "" {
+			continue
+		}
+		start := caption.StartTime
+		if start < 0 {
+			start = 0
+		}
+		end := caption.EndTime
+		if end <= start {
+			end = start + chunkDuration
+		}
+		if end <= start {
+			end = start + 0.5
+		}
+		duration := end - start
+		if duration < 0.05 {
+			duration = 0.05
+			end = start + duration
+		}
+
+		captionSegmentsForEditor = append(captionSegmentsForEditor, editorTimedSegment{
+			Index:    i,
+			Text:     text,
+			Start:    start,
+			End:      end,
+			Duration: duration,
+		})
+		if end > maxCaptionEnd {
+			maxCaptionEnd = end
+		}
+	}
+
+	// Fallback: derive captions from chunk text when Whisper segments are unavailable.
+	if len(captionSegmentsForEditor) == 0 {
+		for i, chunk := range chunks {
+			text := strings.TrimSpace(chunk.Text)
+			if text == "" {
+				continue
+			}
+			start := chunk.StartTime
+			if start < 0 {
+				start = 0
+			}
+			end := start + chunk.Duration
+			if end <= start {
+				end = start + chunkDuration
+			}
+			if end <= start {
+				end = start + 1.0
+			}
+			duration := end - start
+			captionSegmentsForEditor = append(captionSegmentsForEditor, editorTimedSegment{
+				Index:    i,
+				Text:     text,
+				Start:    start,
+				End:      end,
+				Duration: duration,
+			})
+			if end > maxCaptionEnd {
+				maxCaptionEnd = end
+			}
+		}
+	}
+
+	totalTimelineDuration := captionInfo.AudioDuration
+	if totalTimelineDuration <= 0 {
+		totalTimelineDuration = maxCaptionEnd
+	}
+	if totalTimelineDuration <= 0 && len(imageURLs) > 0 {
+		totalTimelineDuration = float64(len(imageURLs)) * chunkDuration
+	}
+	if totalTimelineDuration <= 0 {
+		totalTimelineDuration = float64(len(chunks)) * chunkDuration
+	}
+	if totalTimelineDuration <= 0 {
+		totalTimelineDuration = 5.0
+	}
+
+	imageSegmentsForEditor := make([]editorTimedSegment, 0, len(imageURLs))
+	if len(imageURLs) > 0 {
+		perImageDuration := chunkDuration
+		if perImageDuration <= 0 {
+			perImageDuration = totalTimelineDuration / float64(len(imageURLs))
+		}
+		if perImageDuration <= 0 {
+			perImageDuration = 5.0
+		}
+
+		for i, imageURL := range imageURLs {
+			start := float64(i) * perImageDuration
+			end := start + perImageDuration
+			if i == len(imageURLs)-1 && totalTimelineDuration > start {
+				end = totalTimelineDuration
+			}
+			if end <= start {
+				end = start + perImageDuration
+			}
+			imageSegmentsForEditor = append(imageSegmentsForEditor, editorTimedSegment{
+				Index:    i,
+				URL:      imageURL,
+				Start:    start,
+				End:      end,
+				Duration: end - start,
+			})
+		}
+	}
+
+	buildAudioSegmentsForEditor := func(audioURL string) []editorTimedSegment {
+		if strings.TrimSpace(audioURL) == "" {
+			return []editorTimedSegment{}
+		}
+		audioSegments := make([]editorTimedSegment, 0)
+		if len(captionSegmentsForEditor) > 0 {
+			audioSegments = make([]editorTimedSegment, 0, len(captionSegmentsForEditor))
+			for i, captionSegment := range captionSegmentsForEditor {
+				audioSegments = append(audioSegments, editorTimedSegment{
+					Index:    i,
+					URL:      audioURL,
+					Start:    captionSegment.Start,
+					End:      captionSegment.End,
+					Duration: captionSegment.Duration,
+				})
+			}
+			return audioSegments
+		}
+		audioSegments = append(audioSegments, editorTimedSegment{
+			Index:    0,
+			URL:      audioURL,
+			Start:    0,
+			End:      totalTimelineDuration,
+			Duration: totalTimelineDuration,
+		})
+		return audioSegments
 	}
 
 	// Save images
@@ -710,21 +871,45 @@ func (w *VideoWorker) ProcessVideo(videoRequestID, userID uint64, videoURL, tran
 		return
 	}
 
+	audioTimelineURL := audioAssetURL
+	if strings.TrimSpace(audioTimelineURL) == "" {
+		// Fallback to final video URL when standalone audio upload is unavailable.
+		audioTimelineURL = uploadURL
+	}
+	audioSegmentsForEditor := buildAudioSegmentsForEditor(audioTimelineURL)
+
+	captionSegmentsJSON, _ := json.Marshal(captionSegmentsForEditor)
+	audioSegmentsJSON, _ := json.Marshal(audioSegmentsForEditor)
+	imageSegmentsJSON, _ := json.Marshal(imageSegmentsForEditor)
+
+	var dbAudioURL interface{}
+	if strings.TrimSpace(audioAssetURL) == "" {
+		dbAudioURL = nil
+	} else {
+		dbAudioURL = audioAssetURL
+	}
+
 	// Update videos_requested with final info (store filename and full URL)
 	_, err = w.db.Exec(`
 		UPDATE videos_requested
 		SET phase_of_generation = 'completed',
 			bunny_video_id = ?,
 			bunny_video_url = ?,
+			bunny_audio_url = ?,
+			editor_caption_segments = ?,
+			editor_audio_segments = ?,
+			editor_image_segments = ?,
 			download_expires_at = ?
 		WHERE id = ?
-	`, filename, uploadURL, expiresAt, videoRequestID)
+	`, filename, uploadURL, dbAudioURL, string(captionSegmentsJSON), string(audioSegmentsJSON), string(imageSegmentsJSON), expiresAt, videoRequestID)
 	if err != nil {
 		log.Printf("Failed to update video request: %v", err)
 	}
 
 	// Broadcast completion
-	w.broadcast(videoRequestID, "completed", 100, "Video generation complete!")
+	if w.broadcaster != nil {
+		w.broadcaster.BroadcastComplete(videoRequestID, uploadURL)
+	}
 
 	if logger != nil {
 		logger.Write("=== Video Generation Completed Successfully ===")
@@ -764,7 +949,7 @@ func (w *VideoWorker) GetSignedURL(filename string) (string, error) {
 // CleanupExpiredVideos removes videos older than 48 hours
 func (w *VideoWorker) CleanupExpiredVideos() {
 	var videos []struct {
-		ID           uint64        `db:"id"`
+		ID           uint64         `db:"id"`
 		BunnyVideoID sql.NullString `db:"bunny_video_id"`
 	}
 

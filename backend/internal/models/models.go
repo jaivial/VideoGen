@@ -6,27 +6,27 @@ import (
 )
 
 type User struct {
-	ID           uint64         `db:"id" json:"id"`
-	Name         string         `db:"name" json:"name"`
-	Email        string         `db:"email" json:"email"`
-	PasswordHash string         `db:"password_hash" json:"-"`
-	CreatedAt    time.Time      `db:"created_at" json:"created_at"`
-	UpdatedAt    time.Time      `db:"updated_at" json:"updated_at"`
+	ID           uint64    `db:"id" json:"id"`
+	Name         string    `db:"name" json:"name"`
+	Email        string    `db:"email" json:"email"`
+	PasswordHash string    `db:"password_hash" json:"-"`
+	CreatedAt    time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt    time.Time `db:"updated_at" json:"updated_at"`
 }
 
 type UserVerified struct {
-	ID             uint64 `db:"id" json:"id"`
-	UserID         uint64 `db:"user_id" json:"user_id"`
-	VerifiedState  bool   `db:"verified_state" json:"verified_state"`
+	ID            uint64 `db:"id" json:"id"`
+	UserID        uint64 `db:"user_id" json:"user_id"`
+	VerifiedState bool   `db:"verified_state" json:"verified_state"`
 }
 
 type EmailVerification struct {
-	ID                    uint64    `db:"id" json:"id"`
-	UserID                uint64    `db:"user_id" json:"user_id"`
-	Token                 string    `db:"token" json:"token"`
-	TokenExpirationDate   time.Time `db:"token_expiration_date" json:"token_expiration_date"`
-	TokenCreationDate     time.Time `db:"token_creation_date" json:"token_creation_date"`
-	TokenUsed             bool      `db:"token_used" json:"token_used"`
+	ID                  uint64    `db:"id" json:"id"`
+	UserID              uint64    `db:"user_id" json:"user_id"`
+	Token               string    `db:"token" json:"token"`
+	TokenExpirationDate time.Time `db:"token_expiration_date" json:"token_expiration_date"`
+	TokenCreationDate   time.Time `db:"token_creation_date" json:"token_creation_date"`
+	TokenUsed           bool      `db:"token_used" json:"token_used"`
 }
 
 type UserSession struct {
@@ -45,31 +45,35 @@ type UserVideoURL struct {
 }
 
 type VideosRequested struct {
-	ID                 uint64         `db:"id" json:"id"`
-	UserID             uint64         `db:"user_id" json:"user_id"`
-	UserVideoURLID     uint64         `db:"user_video_url_id" json:"user_video_url_id"`
-	TranscribedText    sql.NullString `db:"transcribed_text" json:"transcribed_text"`
-	IsGenerating       bool           `db:"is_generating" json:"is_generating"`
+	ID                uint64         `db:"id" json:"id"`
+	UserID            uint64         `db:"user_id" json:"user_id"`
+	UserVideoURLID    uint64         `db:"user_video_url_id" json:"user_video_url_id"`
+	TranscribedText   sql.NullString `db:"transcribed_text" json:"transcribed_text"`
+	IsGenerating      bool           `db:"is_generating" json:"is_generating"`
 	PhaseOfGeneration string         `db:"phase_of_generation" json:"phase_of_generation"`
-	ErrorMessage       sql.NullString `db:"error_message" json:"error_message,omitempty"`
-	OutputLanguage     string         `db:"output_language" json:"output_language"`
-	BunnyVideoID       sql.NullString `db:"bunny_video_id" json:"bunny_video_id"`
+	ErrorMessage      sql.NullString `db:"error_message" json:"error_message,omitempty"`
+	OutputLanguage    string         `db:"output_language" json:"output_language"`
+	BunnyVideoID      sql.NullString `db:"bunny_video_id" json:"bunny_video_id"`
 	BunnyVideoURL     sql.NullString `db:"bunny_video_url" json:"bunny_video_url"`
-	DownloadExpiresAt  sql.NullTime    `db:"download_expires_at" json:"download_expires_at"`
-	Downloaded         bool            `db:"downloaded" json:"downloaded"`
-	CreatedAt          time.Time       `db:"created_at" json:"created_at"`
+	BunnyAudioURL     sql.NullString `db:"bunny_audio_url" json:"bunny_audio_url"`
+	EditorCaptionSegs sql.NullString `db:"editor_caption_segments" json:"editor_caption_segments"`
+	EditorAudioSegs   sql.NullString `db:"editor_audio_segments" json:"editor_audio_segments"`
+	EditorImageSegs   sql.NullString `db:"editor_image_segments" json:"editor_image_segments"`
+	DownloadExpiresAt sql.NullTime   `db:"download_expires_at" json:"download_expires_at"`
+	Downloaded        bool           `db:"downloaded" json:"downloaded"`
+	CreatedAt         time.Time      `db:"created_at" json:"created_at"`
 }
 
 type TextTranslation struct {
-	ID                uint64         `db:"id" json:"id"`
-	UserID            uint64         `db:"user_id" json:"user_id"`
-	VideoRequestedID  uint64         `db:"video_requested_id" json:"video_requested_id"`
-	IsGenerating      bool           `db:"is_generating" json:"is_generating"`
-	TextsToTranslate  sql.NullString `db:"texts_to_translate" json:"texts_to_translate"`
-	TextsTranslated   sql.NullString `db:"texts_translated" json:"texts_translated"`
-	LanguageInput     string         `db:"language_input" json:"language_input"`
-	LanguageOutput    string         `db:"language_output" json:"language_output"`
-	CreatedAt         time.Time      `db:"created_at" json:"created_at"`
+	ID               uint64         `db:"id" json:"id"`
+	UserID           uint64         `db:"user_id" json:"user_id"`
+	VideoRequestedID uint64         `db:"video_requested_id" json:"video_requested_id"`
+	IsGenerating     bool           `db:"is_generating" json:"is_generating"`
+	TextsToTranslate sql.NullString `db:"texts_to_translate" json:"texts_to_translate"`
+	TextsTranslated  sql.NullString `db:"texts_translated" json:"texts_translated"`
+	LanguageInput    string         `db:"language_input" json:"language_input"`
+	LanguageOutput   string         `db:"language_output" json:"language_output"`
+	CreatedAt        time.Time      `db:"created_at" json:"created_at"`
 }
 
 type ImagesGenerated struct {
@@ -123,7 +127,7 @@ type VideoGenerateRequest struct {
 }
 
 type VideoStatusResponse struct {
-	ID                 uint64 `json:"id"`
+	ID                uint64 `json:"id"`
 	PhaseOfGeneration string `json:"phase_of_generation"`
 	Progress          int    `json:"progress"`
 	DownloadURL       string `json:"download_url,omitempty"`

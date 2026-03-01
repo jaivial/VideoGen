@@ -27,11 +27,11 @@ services:
       dockerfile: Dockerfile
     container_name: video-generator-backend
     environment:
-      - DB_HOST=host.docker.internal
+      - DB_HOST=mysql
       - DB_PORT=3306
-      - DB_USER=video_user
-      - DB_PASSWORD=video_pass
-      - DB_NAME=video_generator
+      - DB_USER=${MYSQL_USER:-video_user}
+      - DB_PASSWORD=${MYSQL_PASSWORD:-video_pass}
+      - DB_NAME=${MYSQL_DATABASE:-video_generator}
       - JWT_SECRET=${JWT_SECRET:-your-secret-key-change-in-production}
       - WAVESPEED_API_KEY=${WAVESPEED_API_KEY}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}

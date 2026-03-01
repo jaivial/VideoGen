@@ -351,26 +351,29 @@ function VideoCard({
     }
 
     const ws = connectWebSocket(String(video.id), (data) => {
-      if (data.type === 'phase_update') {
+      const payload = data?.payload || {}
+
+      if (data.type === 'step_update' || data.type === 'phase_update') {
         setLocalStatus({
           id: video.id,
-          phase_of_generation: data.payload.phase,
-          progress: data.payload.progress,
+          phase_of_generation: payload.phase ?? data.phase ?? 'pending',
+          progress: Number(payload.progress ?? data.progress ?? 0),
         })
       } else if (data.type === 'completed') {
         setLocalStatus({
           id: video.id,
           phase_of_generation: 'completed',
           progress: 100,
-          download_url: data.payload.download_url,
+          download_url: payload.download_url,
         })
         onRefresh()
       } else if (data.type === 'error') {
+        const errorMsg = payload.message ?? payload.error ?? data.message ?? data.error ?? 'Generation failed'
         setLocalStatus({
           id: video.id,
           phase_of_generation: 'error',
           progress: 0,
-          error: data.payload.message,
+          error: errorMsg,
         })
         onRefresh()
       }
@@ -417,6 +420,8 @@ function VideoCard({
     }
     return progress[phase] || 0
   }
+
+  const displayProgress = localStatus?.progress ?? getPhaseProgress(currentPhase)
 
   const getHumanReadableError = (error: string | { String: string; Valid: boolean } | undefined): string => {
     if (!error) return ''
@@ -504,7 +509,7 @@ function VideoCard({
               <div className="h-1.5 rounded-full" style={{ backgroundColor: colors.border }}>
                 <div
                   className="h-1.5 rounded-full"
-                  style={{ width: `${getPhaseProgress(currentPhase)}%`, backgroundColor: colors.primary }}
+                  style={{ width: `${displayProgress}%`, backgroundColor: colors.primary }}
                 />
               </div>
             </div>

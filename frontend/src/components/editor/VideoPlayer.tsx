@@ -1,15 +1,133 @@
-import { useRef, useEffect, useCallback, useState } from 'react'
+import { useRef, useEffect, useCallback, useMemo, useState, type CSSProperties } from 'react'
 import { useEditorStore, useCurrentTime, useIsPlaying, useDuration } from '../../stores/editorStore'
 
 interface VideoPlayerProps {
   className?: string
 }
 
+const EMPTY_CLIPS: any[] = []
+
+const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value))
+
+function getEffectValue(clip: any, type: string, fallback = 0): number {
+  const effects = Array.isArray(clip?.effects) ? clip.effects : []
+  const match = effects.find((effect: any) => effect?.type === type && effect?.enabled !== false)
+  const value = Number(match?.params?.value)
+  return Number.isFinite(value) ? value : fallback
+}
+
+function getVisualFilterCSS(clip: any): string {
+  if (!clip || (clip.type !== 'video' && clip.type !== 'image')) return ''
+
+  const brightness = getEffectValue(clip, 'brightness', 0)
+  const contrast = getEffectValue(clip, 'contrast', 0)
+  const saturation = getEffectValue(clip, 'saturation', 0)
+  const blur = getEffectValue(clip, 'blur', 0)
+
+  const cssParts: string[] = []
+  if (brightness !== 0) cssParts.push(`brightness(${clamp(100 + brightness, 0, 250)}%)`)
+  if (contrast !== 0) cssParts.push(`contrast(${clamp(100 + contrast, 0, 300)}%)`)
+  if (saturation !== 0) cssParts.push(`saturate(${clamp(100 + saturation, 0, 300)}%)`)
+  if (blur > 0) cssParts.push(`blur(${clamp(blur / 4, 0, 10).toFixed(2)}px)`)
+
+  return cssParts.join(' ')
+}
+
+function hexToRgba(color: string | undefined, alpha: number): string {
+  const normalizedAlpha = clamp(alpha, 0, 1)
+  if (!color) return `rgba(0, 0, 0, ${normalizedAlpha})`
+
+  const hex = color.trim().replace('#', '')
+  if (!/^[0-9a-fA-F]+$/.test(hex)) {
+    return color
+  }
+
+  const expanded = hex.length === 3
+    ? hex.split('').map((part) => `${part}${part}`).join('')
+    : hex
+
+  if (expanded.length !== 6) {
+    return color
+  }
+
+  const r = parseInt(expanded.slice(0, 2), 16)
+  const g = parseInt(expanded.slice(2, 4), 16)
+  const b = parseInt(expanded.slice(4, 6), 16)
+  return `rgba(${r}, ${g}, ${b}, ${normalizedAlpha})`
+}
+
+function getCaptionStyle(caption: any): CSSProperties {
+  const style = caption?.style || {}
+  const alignment = style.alignment === 'left' || style.alignment === 'right' ? style.alignment : 'center'
+  const position = style.position === 'top' || style.position === 'center' ? style.position : 'bottom'
+
+  const fontSize = clamp(Number(style.fontSize) || 32, 14, 120)
+  const fontWeight = clamp(Number(style.fontWeight) || 500, 300, 900)
+  const strokeWidth = clamp(Number(style.strokeWidth) || 0, 0, 8)
+  const lineHeight = clamp(Number(style.lineHeight) || 1.25, 1, 2.2)
+  const backgroundOpacity = clamp(Number(style.backgroundOpacity) || 0, 0, 1)
+
+  const visual: CSSProperties = {
+    position: 'absolute',
+    maxWidth: '84%',
+    color: style.color || '#ffffff',
+    fontSize: `${fontSize}px`,
+    fontWeight,
+    textAlign: alignment,
+    lineHeight,
+    whiteSpace: 'pre-wrap',
+    wordBreak: 'break-word',
+    textShadow: '0 2px 8px rgba(0,0,0,0.65)',
+  }
+
+  if (strokeWidth > 0) {
+    visual.WebkitTextStroke = `${strokeWidth}px ${style.strokeColor || '#000000'}`
+  }
+
+  if (backgroundOpacity > 0) {
+    visual.background = hexToRgba(style.backgroundColor || '#000000', backgroundOpacity)
+    visual.padding = '0.35em 0.6em'
+    visual.borderRadius = '0.4em'
+  }
+
+  const transforms: string[] = []
+
+  if (alignment === 'left') {
+    visual.left = '8%'
+  } else if (alignment === 'right') {
+    visual.right = '8%'
+  } else {
+    visual.left = '50%'
+    transforms.push('translateX(-50%)')
+  }
+
+  if (position === 'top') {
+    visual.top = '7%'
+  } else if (position === 'center') {
+    visual.top = '50%'
+    transforms.push('translateY(-50%)')
+  } else {
+    visual.bottom = '7%'
+  }
+
+  if (transforms.length > 0) {
+    visual.transform = transforms.join(' ')
+  }
+
+  return visual
+}
+
 export function VideoPlayer({ className = '' }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
+  const audioRef = useRef<HTMLAudioElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [showControls, setShowControls] = useState(true)
+  const switchingClipRef = useRef(false)
+  const switchingAudioRef = useRef(false)
+  const imageRafRef = useRef<number | null>(null)
+  const imageLastTsRef = useRef<number | null>(null)
+  const currentTimeRef = useRef(0)
 
   const currentTime = useCurrentTime()
   const isPlaying = useIsPlaying()
@@ -17,49 +135,278 @@ export function VideoPlayer({ className = '' }: VideoPlayerProps) {
 
   const { setCurrentTime, setIsPlaying, togglePlayPause } = useEditorStore()
 
-  // Sync video with store
   useEffect(() => {
+    currentTimeRef.current = currentTime
+  }, [currentTime])
+
+  const videoTrackClips = useEditorStore((state) => state.tracks.find((t) => t.type === 'video')?.clips ?? EMPTY_CLIPS)
+  const audioTrack = useEditorStore((state) => state.tracks.find((t) => t.type === 'audio') ?? null)
+  const audioTrackClips = useEditorStore((state) => state.tracks.find((t) => t.type === 'audio')?.clips ?? EMPTY_CLIPS)
+  const captionTrackClips = useEditorStore((state) => state.tracks.find((t) => t.type === 'caption')?.clips ?? EMPTY_CLIPS)
+  const visualClips = useMemo(() => {
+    return [...videoTrackClips]
+      .filter((c: any) => c.type === 'video' || c.type === 'image')
+      .sort((a: any, b: any) => a.startTime - b.startTime)
+  }, [videoTrackClips])
+  const audioClips = useMemo(() => {
+    return [...audioTrackClips]
+      .filter((c: any) => c.type === 'audio')
+      .sort((a: any, b: any) => a.startTime - b.startTime)
+  }, [audioTrackClips])
+  const captionClips = useMemo(() => {
+    return [...captionTrackClips].filter((clip: any) => clip.type === 'caption')
+  }, [captionTrackClips])
+  const activeCaptions = useMemo(() => {
+    return captionClips
+      .filter((clip: any) => {
+        const start = Number(clip.startTime ?? 0)
+        const duration = Math.max(0, Number(clip.duration ?? 0))
+        const end = start + duration
+        return (
+          typeof clip.text === 'string' &&
+          clip.text.trim().length > 0 &&
+          currentTime >= start &&
+          currentTime < end
+        )
+      })
+      .sort((a: any, b: any) => a.startTime - b.startTime)
+  }, [captionClips, currentTime])
+
+  const activeClip = (() => {
+    for (const clip of visualClips as any[]) {
+      if (currentTime >= clip.startTime && currentTime < clip.startTime + clip.duration) {
+        return clip
+      }
+    }
+    return null
+  })()
+  const activeAudioClip = (() => {
+    for (const clip of audioClips as any[]) {
+      if (currentTime >= clip.startTime && currentTime < clip.startTime + clip.duration) {
+        return clip
+      }
+    }
+    return null
+  })()
+
+  const visualClipsRef = useRef<any[]>([])
+  useEffect(() => {
+    visualClipsRef.current = visualClips as any[]
+  }, [visualClips])
+
+  const getSourceTimeForTimeline = (clip: any, timelineTime: number) => {
+    const speed = Number(clip.speed ?? 1) || 1
+    const offset = Math.max(0, timelineTime - clip.startTime)
+    return Number(clip.trimStart ?? 0) + offset * speed
+  }
+
+  const getTimelineTimeForSource = (clip: any, sourceTime: number) => {
+    const speed = Number(clip.speed ?? 1) || 1
+    const offset = (sourceTime - Number(clip.trimStart ?? 0)) / speed
+    return clip.startTime + Math.max(0, offset)
+  }
+  const getAudioSourceTimeForTimeline = (clip: any, timelineTime: number) => {
+    const offset = Math.max(0, timelineTime - clip.startTime)
+    return Number(clip.trimStart ?? 0) + offset
+  }
+
+  const syncVideoToTimeline = useCallback(async () => {
     const video = videoRef.current
     if (!video) return
 
+    if (!activeClip || activeClip.type !== 'video') {
+      video.pause()
+      if (isPlaying && !activeClip) setIsPlaying(false)
+      return
+    }
+
+    const desiredSrc = activeClip.url
+    const desiredTime = getSourceTimeForTimeline(activeClip, currentTime)
+    const desiredRate = Math.max(0.25, Math.min(4, Number(activeClip.speed ?? 1) || 1))
+
+    const needsSrcChange = video.src !== desiredSrc
+    const needsSeek = Math.abs(video.currentTime - desiredTime) > 0.15
+
+    if (needsSrcChange) {
+      switchingClipRef.current = true
+      video.src = desiredSrc
+      video.load()
+      await new Promise<void>((resolve) => {
+        const onLoaded = () => {
+          video.removeEventListener('loadedmetadata', onLoaded)
+          resolve()
+        }
+        video.addEventListener('loadedmetadata', onLoaded)
+      })
+      switchingClipRef.current = false
+    }
+
+    if (video.playbackRate !== desiredRate) {
+      try {
+        video.playbackRate = desiredRate
+      } catch {
+        // ignore
+      }
+    }
+
+    if (needsSeek) {
+      try {
+        video.currentTime = desiredTime
+      } catch {
+        // ignore
+      }
+    }
+
     if (isPlaying) {
-      video.play().catch(console.error)
+      const playResult = video.play()
+      if (playResult && typeof (playResult as any).catch === 'function') {
+        ;(playResult as any).catch(() => {})
+      }
     } else {
       video.pause()
     }
-  }, [isPlaying])
+  }, [activeClip, currentTime, isPlaying, setIsPlaying])
 
-  // Sync current time
+  // Sync video element to timeline (cuts/trims/speed)
+  useEffect(() => {
+    syncVideoToTimeline()
+  }, [syncVideoToTimeline])
+
+  const syncAudioToTimeline = useCallback(async () => {
+    const audio = audioRef.current
+    if (!audio) return
+
+    if (!activeAudioClip || !activeAudioClip.url) {
+      audio.pause()
+      return
+    }
+
+    const desiredSrc = activeAudioClip.url
+    const desiredTime = getAudioSourceTimeForTimeline(activeAudioClip, currentTime)
+    const needsSrcChange = audio.src !== desiredSrc
+    const needsSeek = Math.abs(audio.currentTime - desiredTime) > 0.2
+    const clipVolume = clamp(Number(activeAudioClip.volume ?? 1), 0, 1)
+    const trackVolume = clamp(Number(audioTrack?.volume ?? 1), 0, 1)
+    const isTrackMuted = Boolean(audioTrack?.muted)
+    const effectiveVolume = isTrackMuted ? 0 : clipVolume * trackVolume
+
+    if (needsSrcChange) {
+      switchingAudioRef.current = true
+      audio.src = desiredSrc
+      audio.load()
+      await new Promise<void>((resolve) => {
+        const onLoaded = () => {
+          audio.removeEventListener('loadedmetadata', onLoaded)
+          resolve()
+        }
+        audio.addEventListener('loadedmetadata', onLoaded)
+      })
+      switchingAudioRef.current = false
+    }
+
+    audio.volume = effectiveVolume
+
+    if (needsSeek && !switchingAudioRef.current) {
+      try {
+        audio.currentTime = desiredTime
+      } catch {
+        // ignore
+      }
+    }
+
+    if (isPlaying) {
+      const playResult = audio.play()
+      if (playResult && typeof (playResult as any).catch === 'function') {
+        ;(playResult as any).catch(() => {})
+      }
+    } else {
+      audio.pause()
+    }
+  }, [activeAudioClip, currentTime, isPlaying, audioTrack])
+
+  useEffect(() => {
+    syncAudioToTimeline()
+  }, [syncAudioToTimeline])
+
+  useEffect(() => {
+    return () => {
+      const audio = audioRef.current
+      if (audio) audio.pause()
+    }
+  }, [])
+
+  // Update timeline time based on video time while playing
   useEffect(() => {
     const video = videoRef.current
     if (!video) return
 
     const handleTimeUpdate = () => {
-      setCurrentTime(video.currentTime)
-    }
+      if (!activeClip || activeClip.type !== 'video' || switchingClipRef.current) return
+      const timelineTime = getTimelineTimeForSource(activeClip, video.currentTime)
 
-    const handleEnded = () => {
-      setIsPlaying(false)
+      // Clamp within the clip bounds for stability
+      const clipEnd = activeClip.startTime + activeClip.duration
+      const clamped = Math.max(activeClip.startTime, Math.min(timelineTime, clipEnd))
+      setCurrentTime(clamped)
+
+      // Jump to next clip when we reach the end of this one
+      const epsilon = 0.03
+      const sourceEnd = Number(activeClip.trimEnd ?? (Number(activeClip.trimStart ?? 0) + activeClip.duration)) - epsilon
+      if (video.currentTime >= sourceEnd || clamped >= clipEnd - epsilon) {
+        const idx = (visualClips as any[]).findIndex((c) => c.id === activeClip.id)
+        const next = idx >= 0 ? (visualClips as any[])[idx + 1] : null
+        if (!next) {
+          setIsPlaying(false)
+          return
+        }
+        // Skip gaps (blank timeline) for now
+        setCurrentTime(next.startTime)
+      }
     }
 
     video.addEventListener('timeupdate', handleTimeUpdate)
-    video.addEventListener('ended', handleEnded)
-
     return () => {
       video.removeEventListener('timeupdate', handleTimeUpdate)
-      video.removeEventListener('ended', handleEnded)
     }
-  }, [setCurrentTime, setIsPlaying])
+  }, [activeClip, visualClips, setCurrentTime, setIsPlaying])
 
-  // Seek video when currentTime changes externally
+  // Basic image clip playback (advance timeline while showing still image)
   useEffect(() => {
-    const video = videoRef.current
-    if (!video) return
+    if (!activeClip || activeClip.type !== 'image' || !isPlaying) return
 
-    if (Math.abs(video.currentTime - currentTime) > 0.1) {
-      video.currentTime = currentTime
+    const tick = (ts: number) => {
+      if (imageLastTsRef.current == null) imageLastTsRef.current = ts
+      const dt = (ts - imageLastTsRef.current) / 1000
+      imageLastTsRef.current = ts
+
+      const nextTime = currentTimeRef.current + dt
+      const clipEnd = activeClip.startTime + activeClip.duration
+
+      if (nextTime >= clipEnd - 0.01) {
+        const clips = visualClipsRef.current
+        const idx = clips.findIndex((c) => c.id === activeClip.id)
+        const next = idx >= 0 ? clips[idx + 1] : null
+        if (!next) {
+          setIsPlaying(false)
+          return
+        }
+        setCurrentTime(next.startTime)
+      } else {
+        setCurrentTime(nextTime)
+      }
+
+      imageRafRef.current = requestAnimationFrame(tick)
     }
-  }, [currentTime])
+
+    imageLastTsRef.current = null
+    imageRafRef.current = requestAnimationFrame(tick)
+
+    return () => {
+      if (imageRafRef.current != null) cancelAnimationFrame(imageRafRef.current)
+      imageRafRef.current = null
+      imageLastTsRef.current = null
+    }
+  }, [activeClip, isPlaying, setCurrentTime, setIsPlaying])
 
   // Format time display
   const formatTime = (seconds: number) => {
@@ -71,8 +418,14 @@ export function VideoPlayer({ className = '' }: VideoPlayerProps) {
 
   // Handle play/pause toggle
   const handlePlayPause = useCallback(() => {
+    if (!isPlaying && !activeClip) {
+      const clips = visualClipsRef.current || []
+      if (clips.length === 0) return
+      const next = clips.find((c) => c.startTime >= currentTime) ?? clips[0]
+      setCurrentTime(next.startTime)
+    }
     togglePlayPause()
-  }, [togglePlayPause])
+  }, [togglePlayPause, isPlaying, activeClip, currentTime, setCurrentTime])
 
   // Handle fullscreen
   const toggleFullscreen = useCallback(() => {
@@ -125,19 +478,12 @@ export function VideoPlayer({ className = '' }: VideoPlayerProps) {
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [handlePlayPause, currentTime, duration, setCurrentTime, toggleFullscreen])
 
-  // Get main video clip from tracks (includes all metadata)
-  const videoClip = useEditorStore((state) => {
-    const videoTrack = state.tracks.find((t) => t.type === 'video')
-    if (videoTrack && videoTrack.clips.length > 0) {
-      return videoTrack.clips[0]
-    }
-    return null
-  })
-
-  // Get video URL and metadata from clip
-  const videoUrl = videoClip?.url || null
-  const originalWidth = (videoClip as any)?.originalWidth
-  const originalHeight = (videoClip as any)?.originalHeight
+  // Get visual URL and metadata from active clip (fallback to first visual clip)
+  const firstVisual = (visualClips as any[])[0] ?? null
+  const visualUrl = activeClip?.url || firstVisual?.url || null
+  const originalWidth = (activeClip as any)?.originalWidth ?? firstVisual?.originalWidth
+  const originalHeight = (activeClip as any)?.originalHeight ?? firstVisual?.originalHeight
+  const visualFilter = useMemo(() => getVisualFilterCSS(activeClip), [activeClip])
 
   // Calculate aspect ratio from original video dimensions
   const aspectRatio = originalWidth && originalHeight
@@ -153,14 +499,30 @@ export function VideoPlayer({ className = '' }: VideoPlayerProps) {
       onMouseLeave={() => setShowControls(isPlaying ? false : true)}
       onClick={handlePlayPause}
     >
-      {videoUrl ? (
+      {visualUrl && activeClip?.type === 'video' ? (
         <video
           ref={videoRef}
-          src={videoUrl}
+          src={visualUrl}
           className="w-full h-full object-contain"
+          style={visualFilter ? { filter: visualFilter } : undefined}
           playsInline
           preload="metadata"
         />
+      ) : visualUrl && activeClip?.type === 'image' ? (
+        <img
+          src={visualUrl}
+          className="w-full h-full object-contain select-none pointer-events-none"
+          style={visualFilter ? { filter: visualFilter } : undefined}
+          alt=""
+          draggable={false}
+        />
+      ) : visualUrl ? (
+        <div className="absolute inset-0 flex items-center justify-center text-gray-400">
+          <div className="text-center">
+            <div className="text-sm text-white/70">No clip at playhead</div>
+            <div className="text-xs text-white/40 mt-1">Move clips onto the timeline to preview</div>
+          </div>
+        </div>
       ) : (
         <div className="absolute inset-0 flex items-center justify-center text-gray-400">
           <div className="text-center">
@@ -171,9 +533,21 @@ export function VideoPlayer({ className = '' }: VideoPlayerProps) {
           </div>
         </div>
       )}
+      <audio ref={audioRef} className="hidden" preload="metadata" />
+
+      {/* Captions overlay */}
+      {activeCaptions.length > 0 && (
+        <div className="absolute inset-0 z-10 pointer-events-none">
+          {activeCaptions.map((caption: any) => (
+            <div key={caption.id} style={getCaptionStyle(caption)}>
+              {caption.text}
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Play/Pause overlay */}
-      {!isPlaying && videoUrl && (
+      {!isPlaying && visualUrl && activeClip && (
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
           <div className="w-16 h-16 rounded-full bg-white/90 flex items-center justify-center shadow-lg">
             <svg className="w-8 h-8 ml-1 text-black" fill="currentColor" viewBox="0 0 24 24">

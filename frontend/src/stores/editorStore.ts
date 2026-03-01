@@ -28,12 +28,12 @@ interface EditorStore extends EditorState {
   // Track actions
   addTrack: (type: 'video' | 'audio' | 'caption', name?: string) => void
   removeTrack: (trackId: string) => void
-  updateTrack: (trackId: string, updates: Partial<Track>) => void
+  updateTrack: (trackId: string, updates: Partial<Track>, options?: { commit?: boolean }) => void
   reorderTracks: (startIndex: number, endIndex: number) => void
 
   // Clip actions
   addClip: (trackId: string, clip: Omit<Clip, 'id' | 'trackId'>) => void
-  updateClip: (clipId: string, updates: Partial<Clip>) => void
+  updateClip: (clipId: string, updates: Partial<Clip>, options?: { commit?: boolean }) => void
   removeClip: (clipId: string) => void
   moveClip: (clipId: string, newTrackId: string, newStartTime: number) => void
   splitClip: (clipId: string, splitTime: number) => void
@@ -65,6 +65,7 @@ interface EditorStore extends EditorState {
   setActivePanel: (panel: EditorState['activePanel']) => void
 
   // History actions (undo/redo)
+  commitHistory: () => void
   undo: () => void
   redo: () => void
   canUndo: () => boolean
@@ -80,7 +81,23 @@ interface EditorStore extends EditorState {
       fps?: number
       thumbnailUrl?: string
       name?: string
-    }
+      separateTracks?: boolean
+      audioUrl?: string
+      imageUrls?: string[]
+      imageSegments?: Array<{ url?: string; start?: number; end?: number; duration?: number }>
+      audioSegments?: Array<{ url?: string; start?: number; end?: number; duration?: number }>
+      captionSegments?: Array<{ text?: string; start?: number; end?: number; duration?: number }>
+      translatedLines?: string[]
+      transcriptionChunks?: Array<{
+        text?: string
+        start_time?: number
+        end_time?: number
+        start?: number
+        end?: number
+        duration?: number
+      }>
+      transcribedText?: string
+    } | number
   ) => void
 }
 
@@ -168,6 +185,173 @@ const saveToHistory = (state: EditorState) => {
   historyIndex = historyStack.length - 1
 }
 
+const recalculateTimelineDuration = (state: EditorState) => {
+  let maxEnd = 0
+  for (const track of state.tracks) {
+    for (const clip of track.clips) {
+      const clipEnd = clip.startTime + clip.duration
+      if (clipEnd > maxEnd) maxEnd = clipEnd
+    }
+  }
+
+  state.duration = maxEnd
+  state.project.duration = maxEnd
+}
+
+const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value))
+
+const normalizeClipTiming = (clip: Clip, updates: Partial<Clip>) => {
+  // Only enforce timing normalization when editing the source range or playback rate.
+  const touchedTiming = 'trimStart' in updates || 'trimEnd' in updates || 'speed' in updates
+  const touchedDurationExplicitly = 'duration' in updates
+
+  if (clip.type === 'video' || clip.type === 'image') {
+    const anyClip = clip as any
+    const originalDuration: number | undefined = anyClip.originalDuration
+
+    const speed = clamp(Number(anyClip.speed ?? 1), 0.25, 4)
+    anyClip.speed = speed
+
+    const minSource = 0.05
+    const maxSource = typeof originalDuration === 'number' && originalDuration > 0 ? originalDuration : Number.POSITIVE_INFINITY
+    clip.trimStart = clamp(Number(clip.trimStart ?? 0), 0, maxSource)
+    clip.trimEnd = clamp(Number(clip.trimEnd ?? 0), 0, maxSource)
+    if (clip.trimEnd < clip.trimStart+ minSource) {
+      clip.trimEnd = clamp(clip.trimStart + minSource, 0, maxSource)
+    }
+
+    if (touchedTiming && !touchedDurationExplicitly) {
+      const sourceLen = Math.max(minSource, clip.trimEnd - clip.trimStart)
+      clip.duration = Math.max(0.05, sourceLen / speed)
+    }
+  }
+
+  if (clip.type === 'audio') {
+    const minSource = 0.05
+    clip.trimStart = Math.max(0, Number(clip.trimStart ?? 0))
+    clip.trimEnd = Math.max(clip.trimStart + minSource, Number(clip.trimEnd ?? 0))
+
+    if (touchedTiming && !touchedDurationExplicitly) {
+      clip.duration = Math.max(0.05, clip.trimEnd - clip.trimStart)
+    }
+  }
+
+  if (clip.type === 'caption') {
+    clip.duration = Math.max(0.05, Number(clip.duration ?? 0))
+    clip.startTime = Math.max(0, Number(clip.startTime ?? 0))
+  }
+}
+
+const createDefaultCaptionStyle = () => ({
+  fontFamily: 'Arial',
+  fontSize: 32,
+  fontWeight: 400,
+  color: '#ffffff',
+  backgroundColor: '#000000',
+  backgroundOpacity: 0,
+  strokeColor: '#000000',
+  strokeWidth: 2,
+  shadowColor: '#000000',
+  shadowBlur: 4,
+  shadowOffsetX: 2,
+  shadowOffsetY: 2,
+  position: 'bottom' as const,
+  alignment: 'center' as const,
+  animation: 'fade' as const,
+  lineHeight: 1.4,
+})
+
+const splitCaptionLines = (translatedLines?: string[], transcribedText?: string): string[] => {
+  const fromTranslated = (translatedLines || [])
+    .map((line) => String(line || '').replace(/\s+/g, ' ').trim())
+    .filter((line) => line.length > 0)
+  if (fromTranslated.length > 0) return fromTranslated
+
+  const source = String(transcribedText || '').trim()
+  if (!source) return []
+
+  const fromText = source
+    .split(/\n+|(?<=[.!?])\s+/)
+    .map((line) => line.replace(/\s+/g, ' ').trim())
+    .filter((line) => line.length > 0)
+  return fromText
+}
+
+const buildCaptionSegmentsForInit = (
+  duration: number,
+  options: {
+    captionSegments?: Array<{ text?: string; start?: number; end?: number; duration?: number }>
+    translatedLines?: string[]
+    transcriptionChunks?: Array<{
+      text?: string
+      start_time?: number
+      end_time?: number
+      start?: number
+      end?: number
+      duration?: number
+    }>
+    transcribedText?: string
+  }
+) => {
+  const clampedDuration = Math.max(0.1, Number(duration) || 0.1)
+
+  const explicitSegments = (options.captionSegments || [])
+    .map((segment) => {
+      const text = String(segment.text || '').trim()
+      const start = Math.max(0, Number(segment.start ?? 0) || 0)
+      let end = Number(segment.end ?? 0) || 0
+      const segDur = Number(segment.duration ?? 0) || 0
+      if (end <= start && segDur > 0) end = start + segDur
+      return { text, start, end }
+    })
+    .filter((segment) => segment.text.length > 0 && segment.end > segment.start)
+
+  if (explicitSegments.length > 0) {
+    return explicitSegments
+  }
+
+  const lines = splitCaptionLines(options.translatedLines, options.transcribedText)
+  if (lines.length === 0) return []
+
+  const chunks = (options.transcriptionChunks || []).map((chunk) => {
+    const rawStart = chunk.start_time ?? chunk.start ?? 0
+    const rawEnd = chunk.end_time ?? chunk.end ?? 0
+    const start = Math.max(0, Number(rawStart) || 0)
+    let end = Number(rawEnd) || 0
+    const chunkDuration = Number(chunk.duration ?? 0) || 0
+    if (end <= start && chunkDuration > 0) end = start + chunkDuration
+    return {
+      text: String(chunk.text || '').trim(),
+      start,
+      end,
+    }
+  })
+
+  const hasValidChunkTimes = chunks.some((chunk) => chunk.end > chunk.start)
+  if (hasValidChunkTimes) {
+    const fromChunks = lines
+      .map((text, index) => {
+        const chunk = chunks[index]
+        if (!chunk || chunk.end <= chunk.start) return null
+        return {
+          text,
+          start: chunk.start,
+          end: chunk.end,
+        }
+      })
+      .filter((segment): segment is { text: string; start: number; end: number } => Boolean(segment))
+
+    if (fromChunks.length > 0) return fromChunks
+  }
+
+  const slotDuration = clampedDuration / lines.length
+  return lines.map((text, index) => {
+    const start = index * slotDuration
+    const end = index === lines.length - 1 ? clampedDuration : (index + 1) * slotDuration
+    return { text, start, end }
+  })
+}
+
 export const useEditorStore = create<EditorStore>()(
   immer((set) => ({
     ...initialState,
@@ -233,12 +417,14 @@ export const useEditorStore = create<EditorStore>()(
         saveToHistory(state)
       }),
 
-    updateTrack: (trackId, updates) =>
+    updateTrack: (trackId, updates, options) =>
       set((state) => {
+        const commit = options?.commit ?? true
         const track = state.tracks.find((t) => t.id === trackId)
         if (track) {
           Object.assign(track, updates)
         }
+        if (commit) saveToHistory(state)
       }),
 
     reorderTracks: (startIndex, endIndex) =>
@@ -271,22 +457,20 @@ export const useEditorStore = create<EditorStore>()(
         }
       }),
 
-    updateClip: (clipId, updates) =>
+    updateClip: (clipId, updates, options) =>
       set((state) => {
+        const commit = options?.commit ?? true
         for (const track of state.tracks) {
           const clip = track.clips.find((c) => c.id === clipId)
           if (clip) {
             Object.assign(clip, updates)
+            normalizeClipTiming(clip as Clip, updates)
 
-            // Update duration if needed
-            const clipEnd = clip.startTime + clip.duration
-            if (clipEnd > state.duration) {
-              state.duration = clipEnd
-              state.project.duration = clipEnd
-            }
+            recalculateTimelineDuration(state)
             break
           }
         }
+        if (commit) saveToHistory(state)
       }),
 
     removeClip: (clipId) =>
@@ -299,6 +483,7 @@ export const useEditorStore = create<EditorStore>()(
           }
         }
         state.selectedClipIds = state.selectedClipIds.filter((id) => id !== clipId)
+        recalculateTimelineDuration(state)
         saveToHistory(state)
       }),
 
@@ -323,16 +508,10 @@ export const useEditorStore = create<EditorStore>()(
             clip.trackId = newTrackId
             clip.startTime = newStartTime
             newTrack.clips.push(clip)
-
-            // Update duration
-            const clipEnd = clip.startTime + clip.duration
-            if (clipEnd > state.duration) {
-              state.duration = clipEnd
-              state.project.duration = clipEnd
-            }
           }
         }
 
+        recalculateTimelineDuration(state)
         saveToHistory(state)
       }),
 
@@ -360,6 +539,7 @@ export const useEditorStore = create<EditorStore>()(
 
               // Insert second clip after first
               track.clips.splice(clipIndex + 1, 0, secondClip as Clip)
+              recalculateTimelineDuration(state)
               saveToHistory(state)
             }
             break
@@ -379,6 +559,7 @@ export const useEditorStore = create<EditorStore>()(
               startTime: clip.startTime + clip.duration,
             }
             track.clips.splice(clipIndex + 1, 0, newClip as Clip)
+            recalculateTimelineDuration(state)
             saveToHistory(state)
             break
           }
@@ -453,6 +634,7 @@ export const useEditorStore = create<EditorStore>()(
             break
           }
         }
+        recalculateTimelineDuration(state)
         saveToHistory(state)
       }),
 
@@ -493,6 +675,14 @@ export const useEditorStore = create<EditorStore>()(
 
     removeMedia: (mediaId) =>
       set((state) => {
+        const mediaItem = state.media.find((m) => m.id === mediaId)
+        if (mediaItem?.url?.startsWith('blob:') && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
+          try {
+            URL.revokeObjectURL(mediaItem.url)
+          } catch {
+            // Ignore revoke failures
+          }
+        }
         state.media = state.media.filter((m) => m.id !== mediaId)
       }),
 
@@ -522,7 +712,7 @@ export const useEditorStore = create<EditorStore>()(
     // UI
     setZoom: (zoom) =>
       set((state) => {
-        state.zoom = Math.max(10, Math.min(200, zoom))
+        state.zoom = Math.max(10, Math.min(150, zoom))
       }),
 
     setScrollX: (scrollX) =>
@@ -541,6 +731,10 @@ export const useEditorStore = create<EditorStore>()(
       }),
 
     // History
+    commitHistory: () =>
+      set((state) => {
+        saveToHistory(state)
+      }),
     undo: () => {
       if (historyIndex > 0) {
         historyIndex--
@@ -564,6 +758,9 @@ export const useEditorStore = create<EditorStore>()(
     // Initialize
     initializeFromVideo: (videoUrl, options = {}) =>
       set((state) => {
+        const normalizedOptions =
+          typeof options === 'number' ? { duration: options } : options
+
         const {
           duration = 60,
           width,
@@ -571,7 +768,17 @@ export const useEditorStore = create<EditorStore>()(
           fps,
           thumbnailUrl,
           name = 'Imported Video',
-        } = options
+          separateTracks = false,
+          audioUrl,
+          imageUrls = [],
+          imageSegments = [],
+          audioSegments = [],
+          captionSegments = [],
+          translatedLines = [],
+          transcriptionChunks = [],
+          transcribedText = '',
+        } = normalizedOptions
+        let derivedDuration = Math.max(0, duration)
 
         // Create media item with full metadata
         const mediaId = uuidv4()
@@ -614,37 +821,299 @@ export const useEditorStore = create<EditorStore>()(
           state.project.frameRate = fps
         }
 
-        // Create video clip on first video track with full metadata
+        // Create visual clips on first video track.
         const videoTrack = state.tracks.find((t) => t.type === 'video')
         if (videoTrack) {
-          const newClip: VideoClip = {
-            id: uuidv4(),
-            trackId: videoTrack.id,
-            mediaId,
-            name,
-            type: 'video',
-            startTime: 0,
-            duration,
-            trimStart: 0,
-            trimEnd: duration,
-            url: videoUrl,
-            thumbnailUrl,
-            volume: 1,
-            speed: 1,
-            volumeKeyframes: [],
-            speedKeyframes: [],
-            effects: [],
-            // Store original media properties
-            originalWidth: width,
-            originalHeight: height,
-            originalDuration: duration,
-            originalFps: fps,
+          const visualImageSegments = separateTracks
+            ? imageSegments
+              .map((segment, index) => {
+                const url = String(segment.url || '').trim()
+                if (!url) return null
+                const start = Math.max(0, Number(segment.start ?? 0) || 0)
+                let end = Number(segment.end ?? 0) || 0
+                const segmentDuration = Number(segment.duration ?? 0) || 0
+                if (end <= start && segmentDuration > 0) end = start + segmentDuration
+                if (end <= start) end = start + 0.05
+                return { url, start, end, index }
+              })
+              .filter((segment): segment is { url: string; start: number; end: number; index: number } => Boolean(segment))
+            : []
+          const visualImageURLs = separateTracks ? imageUrls.filter((url) => typeof url === 'string' && url.trim().length > 0) : []
+
+          if (visualImageSegments.length > 0) {
+            visualImageSegments.forEach((segment, index) => {
+              const imageMediaID = uuidv4()
+              const clipDuration = Math.max(0.05, segment.end - segment.start)
+              state.media.push({
+                id: imageMediaID,
+                name: `${name} • Image ${index + 1}`,
+                type: 'image',
+                url: segment.url,
+                thumbnailUrl: segment.url,
+                duration: clipDuration,
+                width,
+                height,
+                createdAt: Date.now(),
+              })
+
+              const imageClip: VideoClip = {
+                id: uuidv4(),
+                trackId: videoTrack.id,
+                mediaId: imageMediaID,
+                name: `Image ${index + 1}`,
+                type: 'image',
+                startTime: segment.start,
+                duration: clipDuration,
+                trimStart: 0,
+                trimEnd: clipDuration,
+                url: segment.url,
+                thumbnailUrl: segment.url,
+                volume: 0,
+                speed: 1,
+                volumeKeyframes: [],
+                speedKeyframes: [],
+                effects: [],
+                originalWidth: width,
+                originalHeight: height,
+                originalDuration: clipDuration,
+                originalFps: fps,
+              }
+              derivedDuration = Math.max(derivedDuration, segment.start + clipDuration)
+              videoTrack.clips.push(imageClip)
+            })
+          } else if (visualImageURLs.length > 0) {
+            const perClip = Math.max(0.05, duration / visualImageURLs.length)
+
+            visualImageURLs.forEach((imageURL, index) => {
+              const imageMediaID = uuidv4()
+              const start = index * perClip
+              const clipDuration = index === visualImageURLs.length - 1
+                ? Math.max(0.05, duration - start)
+                : perClip
+
+              state.media.push({
+                id: imageMediaID,
+                name: `${name} • Image ${index + 1}`,
+                type: 'image',
+                url: imageURL,
+                thumbnailUrl: imageURL,
+                duration: clipDuration,
+                width,
+                height,
+                createdAt: Date.now(),
+              })
+
+              const imageClip: VideoClip = {
+                id: uuidv4(),
+                trackId: videoTrack.id,
+                mediaId: imageMediaID,
+                name: `Image ${index + 1}`,
+                type: 'image',
+                startTime: start,
+                duration: clipDuration,
+                trimStart: 0,
+                trimEnd: clipDuration,
+                url: imageURL,
+                thumbnailUrl: imageURL,
+                volume: 0,
+                speed: 1,
+                volumeKeyframes: [],
+                speedKeyframes: [],
+                effects: [],
+                originalWidth: width,
+                originalHeight: height,
+                originalDuration: clipDuration,
+                originalFps: fps,
+              }
+              derivedDuration = Math.max(derivedDuration, start + clipDuration)
+              videoTrack.clips.push(imageClip)
+            })
+          } else {
+            const newClip: VideoClip = {
+              id: uuidv4(),
+              trackId: videoTrack.id,
+              mediaId,
+              name,
+              type: 'video',
+              startTime: 0,
+              duration,
+              trimStart: 0,
+              trimEnd: duration,
+              url: videoUrl,
+              thumbnailUrl,
+              volume: separateTracks ? 0 : 1,
+              speed: 1,
+              volumeKeyframes: [],
+              speedKeyframes: [],
+              effects: [],
+              // Store original media properties
+              originalWidth: width,
+              originalHeight: height,
+              originalDuration: duration,
+              originalFps: fps,
+            }
+            derivedDuration = Math.max(derivedDuration, duration)
+            videoTrack.clips.push(newClip)
           }
-          videoTrack.clips.push(newClip)
         }
 
-        state.duration = duration
-        state.project.duration = duration
+        if (separateTracks) {
+          // Create independent audio clip.
+          const audioTrack = state.tracks.find((t) => t.type === 'audio')
+          const resolvedAudioURL = audioUrl || videoUrl
+          if (audioTrack && resolvedAudioURL) {
+            const timedAudioSegments = audioSegments
+              .map((segment, index) => {
+                const segmentURL = String(segment.url || resolvedAudioURL).trim()
+                if (!segmentURL) return null
+                const start = Math.max(0, Number(segment.start ?? 0) || 0)
+                let end = Number(segment.end ?? 0) || 0
+                const segmentDuration = Number(segment.duration ?? 0) || 0
+                if (end <= start && segmentDuration > 0) end = start + segmentDuration
+                if (end <= start) end = start + 0.05
+                return { url: segmentURL, start, end, index }
+              })
+              .filter((segment): segment is { url: string; start: number; end: number; index: number } => Boolean(segment))
+
+            if (timedAudioSegments.length > 0) {
+              timedAudioSegments.forEach((segment, index) => {
+                const clipDuration = Math.max(0.05, segment.end - segment.start)
+                const audioMediaID = uuidv4()
+                state.media.push({
+                  id: audioMediaID,
+                  name: `${name} • Audio ${index + 1}`,
+                  type: 'audio',
+                  url: segment.url,
+                  duration: clipDuration,
+                  createdAt: Date.now(),
+                })
+                audioTrack.clips.push({
+                  id: uuidv4(),
+                  trackId: audioTrack.id,
+                  mediaId: audioMediaID,
+                  name: `${name} Audio ${index + 1}`,
+                  type: 'audio',
+                  startTime: segment.start,
+                  duration: clipDuration,
+                  trimStart: segment.start,
+                  trimEnd: segment.end,
+                  url: segment.url,
+                  volume: 1,
+                  fadeIn: 0,
+                  fadeOut: 0,
+                  volumeKeyframes: [],
+                  effects: [],
+                  waveformData: [],
+                })
+                derivedDuration = Math.max(derivedDuration, segment.start + clipDuration)
+              })
+            } else {
+              const fallbackCaptionAudioSegments = buildCaptionSegmentsForInit(duration, {
+                captionSegments,
+                translatedLines,
+                transcriptionChunks,
+                transcribedText,
+              })
+
+              if (fallbackCaptionAudioSegments.length > 0) {
+                fallbackCaptionAudioSegments.forEach((segment, index) => {
+                  const clipDuration = Math.max(0.05, segment.end - segment.start)
+                  const audioMediaID = uuidv4()
+                  state.media.push({
+                    id: audioMediaID,
+                    name: `${name} • Audio ${index + 1}`,
+                    type: 'audio',
+                    url: resolvedAudioURL,
+                    duration: clipDuration,
+                    createdAt: Date.now(),
+                  })
+                  audioTrack.clips.push({
+                    id: uuidv4(),
+                    trackId: audioTrack.id,
+                    mediaId: audioMediaID,
+                    name: `${name} Audio ${index + 1}`,
+                    type: 'audio',
+                    startTime: segment.start,
+                    duration: clipDuration,
+                    trimStart: segment.start,
+                    trimEnd: segment.end,
+                    url: resolvedAudioURL,
+                    volume: 1,
+                    fadeIn: 0,
+                    fadeOut: 0,
+                    volumeKeyframes: [],
+                    effects: [],
+                    waveformData: [],
+                  })
+                  derivedDuration = Math.max(derivedDuration, segment.start + clipDuration)
+                })
+              } else {
+                const audioMediaID = uuidv4()
+                state.media.push({
+                  id: audioMediaID,
+                  name: `${name} • Audio`,
+                  type: 'audio',
+                  url: resolvedAudioURL,
+                  duration,
+                  createdAt: Date.now(),
+                })
+                audioTrack.clips.push({
+                  id: uuidv4(),
+                  trackId: audioTrack.id,
+                  mediaId: audioMediaID,
+                  name: `${name} Audio`,
+                  type: 'audio',
+                  startTime: 0,
+                  duration,
+                  trimStart: 0,
+                  trimEnd: duration,
+                  url: resolvedAudioURL,
+                  volume: 1,
+                  fadeIn: 0,
+                  fadeOut: 0,
+                  volumeKeyframes: [],
+                  effects: [],
+                  waveformData: [],
+                })
+                derivedDuration = Math.max(derivedDuration, duration)
+              }
+            }
+          }
+
+          // Create independent caption clips.
+          const captionTrack = state.tracks.find((t) => t.type === 'caption')
+          if (captionTrack) {
+            const segments = buildCaptionSegmentsForInit(duration, {
+              captionSegments,
+              translatedLines,
+              transcriptionChunks,
+              transcribedText,
+            })
+
+            segments.forEach((segment, index) => {
+              const captionDuration = Math.max(0.05, segment.end - segment.start)
+              const captionMediaID = uuidv4()
+              captionTrack.clips.push({
+                id: uuidv4(),
+                trackId: captionTrack.id,
+                mediaId: captionMediaID,
+                name: `Caption ${index + 1}`,
+                type: 'caption',
+                startTime: segment.start,
+                duration: captionDuration,
+                trimStart: 0,
+                trimEnd: captionDuration,
+                url: '',
+                text: segment.text,
+                style: createDefaultCaptionStyle(),
+              } as CaptionClip)
+              derivedDuration = Math.max(derivedDuration, segment.start + captionDuration)
+            })
+          }
+        }
+
+        state.duration = derivedDuration
+        state.project.duration = derivedDuration
         state.project.name = name
 
         // Reset history

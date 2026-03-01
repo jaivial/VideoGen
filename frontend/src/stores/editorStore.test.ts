@@ -3,6 +3,15 @@ import { useEditorStore } from './editorStore'
 import type { VideoClip } from '../types/editor'
 
 describe('editorStore', () => {
+  const clearAllClips = () => {
+    while (true) {
+      const state = useEditorStore.getState()
+      const trackWithClip = state.tracks.find((t) => t.clips.length > 0)
+      if (!trackWithClip) break
+      state.removeClip(trackWithClip.clips[0].id)
+    }
+  }
+
   // Helper to reset store to a clean state
   const resetStore = () => {
     const state = useEditorStore.getState()
@@ -17,18 +26,10 @@ describe('editorStore', () => {
   }
 
   beforeEach(() => {
-    // Get current state and reset it
-    const state = useEditorStore.getState()
-
-    // Clear all tracks clips
-    state.tracks.forEach(track => {
-      while (track.clips.length > 0) {
-        const clipId = track.clips[0].id
-        state.removeClip(clipId)
-      }
-    })
+    clearAllClips()
 
     // Reset state values
+    const state = useEditorStore.getState()
     state.setCurrentTime(0)
     state.setDuration(0)
     state.setIsPlaying(false)
@@ -385,6 +386,7 @@ describe('editorStore', () => {
 
   describe('currentTime and duration', () => {
     it('should update currentTime', () => {
+      useEditorStore.getState().setDuration(60)
       useEditorStore.getState().setCurrentTime(10)
 
       expect(useEditorStore.getState().currentTime).toBe(10)
@@ -438,12 +440,12 @@ describe('editorStore', () => {
       expect(useEditorStore.getState().zoom).toBe(100)
     })
 
-    it('should clamp zoom to valid range (10-200)', () => {
+    it('should clamp zoom to valid range (10-150)', () => {
       useEditorStore.getState().setZoom(5)
       expect(useEditorStore.getState().zoom).toBe(10)
 
       useEditorStore.getState().setZoom(300)
-      expect(useEditorStore.getState().zoom).toBe(200)
+      expect(useEditorStore.getState().zoom).toBe(150)
     })
   })
 

@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	mysql "github.com/go-sql-driver/mysql"
 	"video-generator/internal/db"
 	"video-generator/internal/models"
 	"video-generator/internal/services"
@@ -14,10 +15,10 @@ import (
 )
 
 type VideoHandler struct {
-	db            *db.DB
-	videoWorker   *worker.VideoWorker
-	auth          *AuthHandler
-	ytService     *services.YouTubeService
+	db          *db.DB
+	videoWorker *worker.VideoWorker
+	auth        *AuthHandler
+	ytService   *services.YouTubeService
 }
 
 func NewVideoHandler(database *db.DB, vw *worker.VideoWorker, auth *AuthHandler, ytService *services.YouTubeService) *VideoHandler {
@@ -174,7 +175,7 @@ func (h *VideoHandler) List(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type VideoListItem struct {
-		ID                 uint64         `db:"id" json:"id"`
+		ID                uint64         `db:"id" json:"id"`
 		PhaseOfGeneration string         `db:"phase_of_generation" json:"phase_of_generation"`
 		OutputLanguage    string         `db:"output_language" json:"output_language"`
 		Downloaded        bool           `db:"downloaded" json:"downloaded"`
@@ -185,6 +186,16 @@ func (h *VideoHandler) List(w http.ResponseWriter, r *http.Request) {
 	var videos []VideoListItem
 	err = h.db.Select(&videos, "SELECT id, phase_of_generation, output_language, downloaded, created_at, IFNULL(error_message, '') as error_message FROM videos_requested WHERE user_id = ? ORDER BY created_at DESC", userID)
 	if err != nil {
+		// Backward compatibility: older schemas may not have error_message yet.
+		if mysqlErr, ok := err.(*mysql.MySQLError); ok && mysqlErr.Number == 1054 {
+			err = h.db.Select(&videos, "SELECT id, phase_of_generation, output_language, downloaded, created_at FROM videos_requested WHERE user_id = ? ORDER BY created_at DESC", userID)
+			if err == nil {
+				w.WriteHeader(http.StatusOK)
+				json.NewEncoder(w).Encode(videos)
+				return
+			}
+		}
+
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
@@ -288,12 +299,12 @@ type TranscriptRequest struct {
 
 // TranscriptResponse represents the response for transcript endpoint
 type TranscriptResponse struct {
-	VideoID    string                       `json:"video_id"`
-	Language   string                       `json:"language"`
-	Kind       string                       `json:"kind"`
-	PlainText  string                       `json:"plain_text"`
-	Entries    []services.TranscriptEntry  `json:"entries"`
-	Available  []map[string]string         `json:"available_languages,omitempty"`
+	VideoID   string                     `json:"video_id"`
+	Language  string                     `json:"language"`
+	Kind      string                     `json:"kind"`
+	PlainText string                     `json:"plain_text"`
+	Entries   []services.TranscriptEntry `json:"entries"`
+	Available []map[string]string        `json:"available_languages,omitempty"`
 }
 
 // GetTranscript handles GET /api/video/transcript

@@ -291,7 +291,12 @@ export interface VideoAssets {
   id: number
   download_url: string
   audio_url: string
+  image_urls?: string[]
+  image_segments?: MediaSegment[]
+  audio_segments?: MediaSegment[]
   caption_segments: CaptionSegment[]
+  translated_lines?: string[]
+  transcription_chunks?: any[]
   transcribed_text: string
   output_language: string
 }
@@ -301,4 +306,13 @@ export interface CaptionSegment {
   text: string
   start: number
   end: number
+  duration?: number
+}
+
+export interface MediaSegment {
+  index?: number
+  url: string
+  start: number
+  end: number
+  duration?: number
 }

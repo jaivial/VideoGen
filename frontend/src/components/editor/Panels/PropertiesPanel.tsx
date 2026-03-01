@@ -1,6 +1,5 @@
 import { useMemo } from 'react'
 import { useEditorStore, useSelectedClips, useTracks } from '../../../stores/editorStore'
-import type { Clip } from '../../../types/editor'
 
 export function PropertiesPanel() {
   const selectedClips = useSelectedClips()
@@ -33,24 +32,50 @@ export function PropertiesPanel() {
   }
 
   const handleVolumeChange = (value: number) => {
+    if (!Number.isFinite(value)) return
     updateClip(selectedClip.id, { volume: value / 100 })
   }
 
   const handleSpeedChange = (value: number) => {
+    if (!Number.isFinite(value)) return
     updateClip(selectedClip.id, { speed: value / 100 })
   }
 
   const handleTrimStartChange = (value: number) => {
+    if (!Number.isFinite(value)) return
     updateClip(selectedClip.id, { trimStart: value })
   }
 
   const handleTrimEndChange = (value: number) => {
+    if (!Number.isFinite(value)) return
     updateClip(selectedClip.id, { trimEnd: value })
+  }
+
+  const handleStartTimeChange = (value: number) => {
+    if (!Number.isFinite(value)) return
+    updateClip(selectedClip.id, { startTime: Math.max(0, value) } as any)
+  }
+
+  const handleFadeInChange = (value: number) => {
+    if (!Number.isFinite(value)) return
+    updateClip(selectedClip.id, { fadeIn: Math.max(0, value) } as any)
+  }
+
+  const handleFadeOutChange = (value: number) => {
+    if (!Number.isFinite(value)) return
+    updateClip(selectedClip.id, { fadeOut: Math.max(0, value) } as any)
   }
 
   // Get volume and speed values (default to 1 if not set)
   const volume = (selectedClip as any).volume ?? 1
   const speed = (selectedClip as any).speed ?? 1
+  const sourceDuration = Math.max(
+    (selectedClip as any).originalDuration ?? 0,
+    selectedClip.trimEnd ?? 0,
+    selectedClip.duration ?? 0
+  )
+  const fadeIn = (selectedClip as any).fadeIn ?? 0
+  const fadeOut = (selectedClip as any).fadeOut ?? 0
 
   return (
     <div className="flex flex-col h-full">
@@ -79,6 +104,26 @@ export function PropertiesPanel() {
               <span className="text-gray-400">Start:</span>
               <span className="text-white">{selectedClip.startTime.toFixed(2)}s</span>
             </div>
+            <div className="flex justify-between text-xs">
+              <span className="text-gray-400">Source:</span>
+              <span className="text-white">{sourceDuration.toFixed(2)}s</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Timeline position */}
+        <div>
+          <h4 className="text-xs font-medium text-gray-400 mb-2">Timeline</h4>
+          <div>
+            <label className="text-xs text-gray-500">Start Time</label>
+            <input
+              type="number"
+              min="0"
+              step="0.1"
+              value={selectedClip.startTime.toFixed(2)}
+              onChange={(e) => handleStartTimeChange(parseFloat(e.target.value))}
+              className="w-full mt-1 px-2 py-1 bg-gray-800 border border-gray-700 rounded text-white text-sm"
+            />
           </div>
         </div>
 
@@ -135,7 +180,7 @@ export function PropertiesPanel() {
               <input
                 type="number"
                 min="0"
-                max={selectedClip.duration}
+                max={sourceDuration}
                 step="0.1"
                 value={selectedClip.trimStart.toFixed(2)}
                 onChange={(e) => handleTrimStartChange(parseFloat(e.target.value))}
@@ -147,7 +192,7 @@ export function PropertiesPanel() {
               <input
                 type="number"
                 min="0"
-                max={selectedClip.duration}
+                max={sourceDuration}
                 step="0.1"
                 value={selectedClip.trimEnd.toFixed(2)}
                 onChange={(e) => handleTrimEndChange(parseFloat(e.target.value))}
@@ -156,6 +201,45 @@ export function PropertiesPanel() {
             </div>
           </div>
         </div>
+
+        {/* Audio fades */}
+        {selectedClip.type === 'audio' && (
+          <div>
+            <h4 className="text-xs font-medium text-gray-400 mb-2">Fades</h4>
+            <div className="space-y-3">
+              <div>
+                <div className="flex justify-between text-xs text-gray-500 mb-1">
+                  <span>Fade In</span>
+                  <span>{fadeIn.toFixed(2)}s</span>
+                </div>
+                <input
+                  type="range"
+                  min="0"
+                  max={Math.max(0.1, selectedClip.duration)}
+                  step="0.05"
+                  value={fadeIn}
+                  onChange={(e) => handleFadeInChange(parseFloat(e.target.value))}
+                  className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer"
+                />
+              </div>
+              <div>
+                <div className="flex justify-between text-xs text-gray-500 mb-1">
+                  <span>Fade Out</span>
+                  <span>{fadeOut.toFixed(2)}s</span>
+                </div>
+                <input
+                  type="range"
+                  min="0"
+                  max={Math.max(0.1, selectedClip.duration)}
+                  step="0.05"
+                  value={fadeOut}
+                  onChange={(e) => handleFadeOutChange(parseFloat(e.target.value))}
+                  className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer"
+                />
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Effects Preview */}
         {(selectedClip as any).effects && (selectedClip as any).effects.length > 0 && (

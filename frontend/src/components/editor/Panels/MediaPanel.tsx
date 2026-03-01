@@ -1,6 +1,8 @@
 import { useState, useCallback } from 'react'
 import { useEditorStore } from '../../../stores/editorStore'
-import type { MediaItem, VideoClip } from '../../../types/editor'
+import type { MediaItem } from '../../../types/editor'
+import { generateWaveformFromArrayBuffer } from '../../../utils/waveform'
+import { api } from '../../../api'
 
 // Helper to get full media metadata including width, height, fps
 async function getFullMediaMetadata(url: string, type: 'video' | 'image' | 'audio'): Promise<{
@@ -22,37 +24,53 @@ async function getFullMediaMetadata(url: string, type: 'video' | 'image' | 'audi
           fps: undefined,
           thumbnailUrl: undefined,
         })
-        URL.revokeObjectURL(url)
       }
       audio.onerror = () => {
         resolve({ duration: 5 })
-        URL.revokeObjectURL(url)
       }
       audio.src = url
       return
     }
 
-    const element = document.createElement(type)
-    element.preload = 'metadata'
+    if (type === 'image') {
+      const img = new Image()
+      img.onload = () => {
+        resolve({
+          duration: 5,
+          width: img.naturalWidth,
+          height: img.naturalHeight,
+          fps: undefined,
+          thumbnailUrl: url,
+        })
+      }
+      img.onerror = () => {
+        resolve({ duration: 5 })
+      }
+      img.src = url
+      return
+    }
 
-    element.onloadedmetadata = async () => {
-      const width = (element as HTMLVideoElement).videoWidth
-      const height = (element as HTMLVideoElement).videoHeight
-      const duration = element.duration || 5
+    const video = document.createElement('video')
+    video.preload = 'metadata'
+
+    video.onloadedmetadata = async () => {
+      const width = video.videoWidth
+      const height = video.videoHeight
+      const duration = video.duration || 5
 
       // Generate thumbnail for video
       let thumbnailUrl: string | undefined
-      if (type === 'video' && width && height) {
+      if (width && height) {
         try {
           const canvas = document.createElement('canvas')
           canvas.width = width
           canvas.height = height
           const ctx = canvas.getContext('2d')
           if (ctx) {
-            element.currentTime = 0
+            video.currentTime = 0
             await new Promise<void>((res) => {
-              element.onseeked = () => {
-                ctx.drawImage(element, 0, 0, width, height)
+              video.onseeked = () => {
+                ctx.drawImage(video, 0, 0, width, height)
                 thumbnailUrl = canvas.toDataURL('image/jpeg', 0.8)
                 res()
               }
@@ -65,28 +83,29 @@ async function getFullMediaMetadata(url: string, type: 'video' | 'image' | 'audi
 
       resolve({
         duration,
-        width: type === 'video' || type === 'image' ? width : undefined,
-        height: type === 'video' || type === 'image' ? height : undefined,
-        fps: type === 'video' ? 30 : undefined, // Default fps, could be detected
+        width,
+        height,
+        fps: 30, // Default fps, could be detected via frame analysis
         thumbnailUrl,
       })
-      URL.revokeObjectURL(url)
     }
 
-    element.onerror = () => {
+    video.onerror = () => {
       resolve({ duration: 5 })
-      URL.revokeObjectURL(url)
     }
-    element.src = url
+
+    video.src = url
   })
 }
 
 export function MediaPanel() {
-  const { media, addMedia, removeMedia, addClip, tracks, project } = useEditorStore()
+  const { media, addMedia, removeMedia, addClip, tracks } = useEditorStore()
   const [isUploading, setIsUploading] = useState(false)
+  const [uploadWarning, setUploadWarning] = useState<string | null>(null)
 
   const handleFileUpload = useCallback(async (files: FileList) => {
     setIsUploading(true)
+    setUploadWarning(null)
 
     for (const file of Array.from(files)) {
       // Determine media type
@@ -101,23 +120,58 @@ export function MediaPanel() {
         continue
       }
 
-      // Create object URL for preview
-      const url = URL.createObjectURL(file)
+      // Local URL is used only for fast metadata extraction on the client.
+      const localObjectURL = URL.createObjectURL(file)
 
       // Get full metadata for video/image/audio
-      const metadata = await getFullMediaMetadata(url, type)
+      const metadata = await getFullMediaMetadata(localObjectURL, type)
+
+      // Generate waveform peaks for audio
+      let waveformData: number[] | undefined
+      if (type === 'audio') {
+        try {
+          const arrayBuffer = await file.arrayBuffer()
+          const wf = await generateWaveformFromArrayBuffer(arrayBuffer, 200)
+          waveformData = wf.peaks
+          if (wf.duration > 0) metadata.duration = wf.duration
+        } catch {
+          // Ignore waveform failures
+        }
+      }
+
+      let uploadURL = ''
+      try {
+        const uploaded = await api.uploadMedia(file, type)
+        uploadURL = uploaded.url || localObjectURL
+        if (!uploaded.url) {
+          setUploadWarning('Some files are local-only because upload returned no URL. Those clips cannot be exported on server-side FFmpeg.')
+        }
+      } catch {
+        uploadURL = localObjectURL
+        setUploadWarning('Some files are local-only because upload failed. Those clips cannot be exported on server-side FFmpeg.')
+      }
+
+      const thumbnailUrl =
+        type === 'image'
+          ? uploadURL
+          : metadata.thumbnailUrl
 
       // Add to media library with full metadata
       addMedia({
         name: file.name,
         type,
-        url,
+        url: uploadURL,
         duration: metadata.duration,
         width: metadata.width,
         height: metadata.height,
         fps: metadata.fps,
-        thumbnailUrl: metadata.thumbnailUrl,
+        thumbnailUrl,
+        waveformData,
       })
+
+      if (uploadURL !== localObjectURL || type !== 'image') {
+        URL.revokeObjectURL(localObjectURL)
+      }
     }
 
     setIsUploading(false)
@@ -136,7 +190,8 @@ export function MediaPanel() {
 
   const handleAddToTimeline = useCallback((mediaItem: MediaItem) => {
     // Find appropriate track
-    const track = tracks.find((t) => t.type === mediaItem.type)
+    const targetTrackType = mediaItem.type === 'image' ? 'video' : mediaItem.type
+    const track = tracks.find((t) => t.type === targetTrackType)
     if (!track) {
       console.error('No track found for media type:', mediaItem.type)
       return
@@ -156,11 +211,22 @@ export function MediaPanel() {
       trimEnd: mediaItem.duration,
       url: mediaItem.url,
       thumbnailUrl: mediaItem.thumbnailUrl,
-      volume: 1,
-      speed: 1,
-      volumeKeyframes: [],
-      speedKeyframes: [],
-      effects: [],
+      ...(mediaItem.type === 'audio'
+        ? {
+            volume: 1,
+            fadeIn: 0,
+            fadeOut: 0,
+            volumeKeyframes: [],
+            effects: [],
+            waveformData: mediaItem.waveformData,
+          }
+        : {
+            volume: 1,
+            speed: 1,
+            volumeKeyframes: [],
+            speedKeyframes: [],
+            effects: [],
+          }),
     }
 
     // Include original media properties for video/image
@@ -214,6 +280,12 @@ export function MediaPanel() {
           </>
         )}
       </div>
+
+      {uploadWarning && (
+        <div className="mx-4 mb-3 px-3 py-2 rounded-lg border border-amber-500/30 bg-amber-500/10 text-amber-200 text-xs">
+          {uploadWarning}
+        </div>
+      )}
 
       {/* Media grid */}
       <div className="flex-1 overflow-y-auto p-4">

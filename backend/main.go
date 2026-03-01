@@ -6,12 +6,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"github.com/joho/godotenv"
 	"video-generator/internal/config"
 	"video-generator/internal/db"
 	"video-generator/internal/handlers"
@@ -21,9 +21,6 @@ import (
 
 func main() {
 	flag.Parse()
-
-	// Load .env file from project root if exists
-	godotenv.Load("/root/video-generator/.env")
 
 	cfg := config.Load()
 
@@ -41,6 +38,10 @@ func main() {
 	if err := os.MkdirAll(tempDir, 0755); err != nil {
 		log.Fatalf("Failed to create temp directory: %v", err)
 	}
+	editorUploadsDir := filepath.Join(tempDir, "editor_uploads")
+	if err := os.MkdirAll(editorUploadsDir, 0755); err != nil {
+		log.Fatalf("Failed to create editor uploads directory: %v", err)
+	}
 
 	// Initialize services
 	emailService := services.NewEmailService(cfg)
@@ -49,6 +50,7 @@ func main() {
 	openRouterService := services.NewOpenRouterService(cfg)
 	bunnyService := services.NewBunnyService(cfg)
 	videoProcessor := services.NewVideoProcessor(tempDir, cfg)
+	editorRenderer := services.NewEditorRenderService(tempDir, cfg)
 
 	// Initialize handlers
 	wsHandler := handlers.NewWebSocketHandler()
@@ -58,7 +60,7 @@ func main() {
 		bunnyService, videoProcessor, wsHandler, tempDir, cfg,
 	)
 	videoHandler := handlers.NewVideoHandler(database, videoWorker, authHandler, ytService)
-	editorHandler := handlers.NewEditorHandler(database, bunnyService, authHandler)
+	editorHandler := handlers.NewEditorHandler(database, bunnyService, authHandler, editorRenderer, tempDir)
 
 	// Start cleanup goroutine
 	go func() {
@@ -75,7 +77,6 @@ func main() {
 	// Middleware
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
-	r.Use(middleware.Timeout(60 * time.Second))
 
 	// CORS
 	r.Use(func(next http.Handler) http.Handler {
@@ -87,12 +88,14 @@ func main() {
 			} else {
 				w.Header().Set("Access-Control-Allow-Origin", "*")
 			}
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Cookie")
+			w.Header().Set("Vary", "Origin")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Authorization, X-Requested-With, X-Session-ID")
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			w.Header().Set("Access-Control-Max-Age", "86400")
 
 			if r.Method == "OPTIONS" {
-				w.WriteHeader(http.StatusOK)
+				w.WriteHeader(http.StatusNoContent)
 				return
 			}
 
@@ -100,14 +103,20 @@ func main() {
 		})
 	})
 
+	api := chi.NewRouter()
+	api.Use(middleware.Timeout(60 * time.Second))
+	api.Options("/*", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+
 	// Public routes
-	r.Post("/api/auth/register", authHandler.Register)
-	r.Post("/api/auth/login", authHandler.Login)
-	r.Post("/api/auth/logout", authHandler.Logout)
-	r.Get("/api/auth/verify", authHandler.Verify)
+	api.Post("/auth/register", authHandler.Register)
+	api.Post("/auth/login", authHandler.Login)
+	api.Post("/auth/logout", authHandler.Logout)
+	api.Get("/auth/verify", authHandler.Verify)
 
 	// Protected routes
-	r.Group(func(r chi.Router) {
+	api.Group(func(r chi.Router) {
 		r.Use(func(next http.Handler) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				cookie, err := r.Cookie("session_id")
@@ -120,20 +129,28 @@ func main() {
 			})
 		})
 
-		r.Get("/api/auth/me", authHandler.Me)
-		r.Post("/api/video/generate", videoHandler.Generate)
-		r.Get("/api/video/status", videoHandler.Status)
-		r.Get("/api/video/list", videoHandler.List)
-		r.Post("/api/video/mark-downloaded", videoHandler.MarkDownloaded)
-		r.Get("/api/video/languages", videoHandler.GetLanguages)
-		r.Get("/api/video/transcript", videoHandler.GetTranscript)
-		r.Get("/api/video/transcript/languages", videoHandler.GetAvailableTranscriptLanguages)
+		r.Get("/auth/me", authHandler.Me)
+		r.Post("/video/generate", videoHandler.Generate)
+		r.Get("/video/status", videoHandler.Status)
+		r.Get("/video/list", videoHandler.List)
+		r.Post("/video/mark-downloaded", videoHandler.MarkDownloaded)
+		r.Get("/video/languages", videoHandler.GetLanguages)
+		r.Get("/video/transcript", videoHandler.GetTranscript)
+		r.Get("/video/transcript/languages", videoHandler.GetAvailableTranscriptLanguages)
 
 		// Editor routes
-		r.Post("/api/editor/upload-media", editorHandler.UploadMedia)
-		r.Post("/api/editor/video/{id}/process", editorHandler.ProcessVideo)
-		r.Get("/api/editor/video/{id}/assets", editorHandler.GetVideoAssets)
+		r.Post("/editor/upload-media", editorHandler.UploadMedia)
+		r.Post("/editor/video/{id}/process", editorHandler.ProcessVideo)
+		r.Get("/editor/video/{id}/assets", editorHandler.GetVideoAssets)
+		// Rendering can take longer than typical API calls.
+		r.With(middleware.Timeout(10*time.Minute)).Post("/editor/video/{id}/render", editorHandler.RenderVideo)
 	})
+
+	r.Mount("/api", api)
+	r.Options("/*", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	r.Handle("/media/editor/*", http.StripPrefix("/media/editor/", http.FileServer(http.Dir(editorUploadsDir))))
 
 	// WebSocket
 	r.Get("/ws/video/{id}", func(w http.ResponseWriter, r *http.Request) {
