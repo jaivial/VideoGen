@@ -1,6 +1,6 @@
-import { useState, useCallback } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { useEditorStore } from '../../../stores/editorStore'
-import type { MediaItem } from '../../../types/editor'
+import type { GeneratedVideo, MediaItem, VideoAssets } from '../../../types/editor'
 import { generateWaveformFromArrayBuffer } from '../../../utils/waveform'
 import { api } from '../../../api'
 
@@ -99,9 +99,12 @@ async function getFullMediaMetadata(url: string, type: 'video' | 'image' | 'audi
 }
 
 export function MediaPanel() {
-  const { media, addMedia, removeMedia, addClip, tracks } = useEditorStore()
+  const { media, addMedia, removeMedia, addClip, tracks, addCaption, setCurrentTime } = useEditorStore()
   const [isUploading, setIsUploading] = useState(false)
   const [uploadWarning, setUploadWarning] = useState<string | null>(null)
+  const [viewMode, setViewMode] = useState<'upload' | 'generated'>('upload')
+  const [generatedVideos, setGeneratedVideos] = useState<GeneratedVideo[]>([])
+  const [isLoadingVideos, setIsLoadingVideos] = useState(false)
 
   const handleFileUpload = useCallback(async (files: FileList) => {
     setIsUploading(true)
@@ -240,11 +243,145 @@ export function MediaPanel() {
     addClip(track.id, clipData)
   }, [tracks, addClip])
 
+  useEffect(() => {
+    if (viewMode !== 'generated') {
+      return
+    }
+
+    setIsLoadingVideos(true)
+    api.listVideos()
+      .then((videos: GeneratedVideo[]) => {
+        setGeneratedVideos(videos.filter((video) =>
+          video.phase_of_generation === 'completed' &&
+          (video.bunny_video_url || video.bunny_audio_url),
+        ))
+      })
+      .catch((err) => {
+        console.error('Failed to load videos:', err)
+      })
+      .finally(() => {
+        setIsLoadingVideos(false)
+      })
+  }, [viewMode])
+
+  const handleImportVideo = useCallback(async (video: GeneratedVideo) => {
+    try {
+      const assets: VideoAssets = await api.getVideoAssets(String(video.id))
+
+      if (assets.download_url) {
+        const videoMetadata = await getFullMediaMetadata(assets.download_url, 'video')
+        addMedia({
+          name: `Video ${video.id}`,
+          type: 'video',
+          url: assets.download_url,
+          duration: videoMetadata.duration,
+          width: videoMetadata.width,
+          height: videoMetadata.height,
+          fps: videoMetadata.fps,
+          thumbnailUrl: videoMetadata.thumbnailUrl,
+        })
+
+        const state = useEditorStore.getState()
+        const videoMediaId = state.media[state.media.length - 1]?.id || `generated-video-${video.id}`
+        const videoTrack = tracks.find((track) => track.type === 'video')
+        if (videoTrack) {
+          addClip(videoTrack.id, {
+            mediaId: videoMediaId,
+            name: `Video ${video.id}`,
+            type: 'video',
+            startTime: 0,
+            duration: videoMetadata.duration,
+            trimStart: 0,
+            trimEnd: videoMetadata.duration,
+            url: assets.download_url,
+            thumbnailUrl: videoMetadata.thumbnailUrl,
+            volume: 1,
+            speed: 1,
+            volumeKeyframes: [],
+            speedKeyframes: [],
+            effects: [],
+            originalWidth: videoMetadata.width,
+            originalHeight: videoMetadata.height,
+            originalDuration: videoMetadata.duration,
+            originalFps: videoMetadata.fps,
+          })
+        }
+      }
+
+      if (assets.audio_url) {
+        const audioMetadata = await getFullMediaMetadata(assets.audio_url, 'audio')
+        addMedia({
+          name: `Audio ${video.id}`,
+          type: 'audio',
+          url: assets.audio_url,
+          duration: audioMetadata.duration,
+        })
+
+        const state = useEditorStore.getState()
+        const audioMediaId = state.media[state.media.length - 1]?.id || `generated-audio-${video.id}`
+        const audioTrack = tracks.find((track) => track.type === 'audio')
+        if (audioTrack) {
+          addClip(audioTrack.id, {
+            mediaId: audioMediaId,
+            name: `Audio ${video.id}`,
+            type: 'audio',
+            startTime: 0,
+            duration: audioMetadata.duration,
+            trimStart: 0,
+            trimEnd: audioMetadata.duration,
+            url: assets.audio_url,
+            volume: 1,
+            fadeIn: 0,
+            fadeOut: 0,
+            volumeKeyframes: [],
+            effects: [],
+          })
+        }
+      }
+
+      if (Array.isArray(assets.caption_segments)) {
+        for (const segment of assets.caption_segments) {
+          if (typeof segment?.start === 'number' && typeof segment?.end === 'number') {
+            addCaption(segment.start, segment.end, segment.text || 'Caption')
+          }
+        }
+      }
+
+      setCurrentTime(0)
+    } catch (err) {
+      console.error('Failed to import video:', err)
+    }
+  }, [tracks, addMedia, addClip, addCaption, setCurrentTime])
+
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
       <div className="px-4 py-3 border-b border-gray-700">
-        <h3 className="text-sm font-semibold text-white">Media Library</h3>
+        <div className="flex items-center justify-between gap-2">
+          <h3 className="text-sm font-semibold text-white">Media Library</h3>
+          <div className="flex gap-1 rounded-lg bg-gray-900/70 p-1">
+            <button
+              onClick={() => setViewMode('upload')}
+              className={`px-3 py-1 text-xs rounded ${
+                viewMode === 'upload'
+                  ? 'bg-blue-600 text-white'
+                  : 'text-gray-300 hover:bg-gray-700'
+              }`}
+            >
+              Upload
+            </button>
+            <button
+              onClick={() => setViewMode('generated')}
+              className={`px-3 py-1 text-xs rounded ${
+                viewMode === 'generated'
+                  ? 'bg-blue-600 text-white'
+                  : 'text-gray-300 hover:bg-gray-700'
+              }`}
+            >
+              Generated
+            </button>
+          </div>
+        </div>
       </div>
 
       {/* Upload area */}
@@ -287,25 +424,66 @@ export function MediaPanel() {
         </div>
       )}
 
-      {/* Media grid */}
-      <div className="flex-1 overflow-y-auto p-4">
-        {media.length === 0 ? (
-          <div className="text-center text-gray-500 text-sm py-8">
-            No media files yet
-          </div>
-        ) : (
-          <div className="grid grid-cols-2 gap-2">
-            {media.map((item) => (
-              <MediaThumbnail
-                key={item.id}
-                item={item}
-                onAdd={() => handleAddToTimeline(item)}
-                onDelete={() => removeMedia(item.id)}
-              />
-            ))}
-          </div>
-        )}
-      </div>
+      {viewMode === 'upload' ? (
+        <div className="flex-1 overflow-y-auto p-4">
+          {media.length === 0 ? (
+            <div className="text-center text-gray-500 text-sm py-8">
+              No media files yet
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 gap-2">
+              {media.map((item) => (
+                <MediaThumbnail
+                  key={item.id}
+                  item={item}
+                  onAdd={() => handleAddToTimeline(item)}
+                  onDelete={() => removeMedia(item.id)}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+      ) : (
+        <div className="flex-1 overflow-y-auto p-4">
+          {isLoadingVideos ? (
+            <div className="flex items-center justify-center py-8">
+              <svg className="animate-spin h-6 w-6 text-blue-500" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+              </svg>
+            </div>
+          ) : generatedVideos.length === 0 ? (
+            <div className="text-center text-gray-500 text-sm py-8">
+              No generated videos yet
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {generatedVideos.map((video) => (
+                <div
+                  key={video.id}
+                  className="bg-gray-800 rounded-lg p-3 flex items-center justify-between gap-3"
+                >
+                  <div>
+                    <p className="text-sm text-white">Video #{video.id}</p>
+                    <p className="text-xs text-gray-500">
+                      {video.bunny_video_url && 'Video'}
+                      {video.bunny_video_url && video.bunny_audio_url ? ', ' : ''}
+                      {video.bunny_audio_url && 'Audio'}
+                      {video.has_caption_segments ? ', Captions' : ''}
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => handleImportVideo(video)}
+                    className="px-3 py-1 bg-blue-600 text-white text-xs rounded hover:bg-blue-500"
+                  >
+                    Import
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   )
 }

@@ -59,6 +59,7 @@ type VideosRequested struct {
 	EditorCaptionSegs sql.NullString `db:"editor_caption_segments" json:"editor_caption_segments"`
 	EditorAudioSegs   sql.NullString `db:"editor_audio_segments" json:"editor_audio_segments"`
 	EditorImageSegs   sql.NullString `db:"editor_image_segments" json:"editor_image_segments"`
+	CaptionSegments   sql.NullString `db:"caption_segments" json:"caption_segments"`
 	DownloadExpiresAt sql.NullTime   `db:"download_expires_at" json:"download_expires_at"`
 	Downloaded        bool           `db:"downloaded" json:"downloaded"`
 	CreatedAt         time.Time      `db:"created_at" json:"created_at"`

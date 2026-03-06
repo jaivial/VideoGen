@@ -3,8 +3,12 @@ package handlers
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	mysql "github.com/go-sql-driver/mysql"
@@ -20,6 +24,11 @@ type VideoHandler struct {
 	auth        *AuthHandler
 	ytService   *services.YouTubeService
 }
+
+const (
+	maxDocumentUploadSize     int64 = 100 << 20
+	documentUploadMemoryLimit int64 = 8 << 20
+)
 
 func NewVideoHandler(database *db.DB, vw *worker.VideoWorker, auth *AuthHandler, ytService *services.YouTubeService) *VideoHandler {
 	return &VideoHandler{
@@ -109,6 +118,59 @@ func (h *VideoHandler) Generate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (h *VideoHandler) ExtractDocument(w http.ResponseWriter, r *http.Request) {
+	if _, err := h.auth.GetSessionUser(w, r); err != nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	if err := r.ParseMultipartForm(documentUploadMemoryLimit); err != nil {
+		http.Error(w, "Failed to parse upload: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "No file provided", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	if err := validateDocumentUploadSize(header.Size); err != nil {
+		http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
+		return
+	}
+
+	content, err := io.ReadAll(file)
+	if err != nil {
+		http.Error(w, "Failed to read file", http.StatusInternalServerError)
+		return
+	}
+
+	text, err := services.ExtractDocumentText(header.Filename, content)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	fileType := strings.TrimPrefix(strings.ToLower(filepath.Ext(header.Filename)), ".")
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{
+		"text":      text,
+		"filename":  header.Filename,
+		"file_type": fileType,
+	})
+}
+
+func validateDocumentUploadSize(size int64) error {
+	if size > maxDocumentUploadSize {
+		return fmt.Errorf("document is too large; max size is %dMB", maxDocumentUploadSize>>20)
+	}
+
+	return nil
+}
+
 func (h *VideoHandler) Status(w http.ResponseWriter, r *http.Request) {
 	userID, err := h.auth.GetSessionUser(w, r)
 	if err != nil {
@@ -175,16 +237,25 @@ func (h *VideoHandler) List(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type VideoListItem struct {
-		ID                uint64         `db:"id" json:"id"`
-		PhaseOfGeneration string         `db:"phase_of_generation" json:"phase_of_generation"`
-		OutputLanguage    string         `db:"output_language" json:"output_language"`
-		Downloaded        bool           `db:"downloaded" json:"downloaded"`
-		CreatedAt         time.Time      `db:"created_at" json:"created_at"`
-		ErrorMessage      sql.NullString `db:"error_message" json:"error_message,omitempty"`
+		ID                 uint64         `db:"id" json:"id"`
+		PhaseOfGeneration  string         `db:"phase_of_generation" json:"phase_of_generation"`
+		OutputLanguage     string         `db:"output_language" json:"output_language"`
+		Downloaded         bool           `db:"downloaded" json:"downloaded"`
+		BunnyVideoURL      string         `db:"bunny_video_url" json:"bunny_video_url"`
+		BunnyAudioURL      string         `db:"bunny_audio_url" json:"bunny_audio_url"`
+		HasCaptionSegments bool           `db:"has_caption_segments" json:"has_caption_segments"`
+		CreatedAt          time.Time      `db:"created_at" json:"created_at"`
+		ErrorMessage       sql.NullString `db:"error_message" json:"error_message,omitempty"`
 	}
 
 	var videos []VideoListItem
-	err = h.db.Select(&videos, "SELECT id, phase_of_generation, output_language, downloaded, created_at, IFNULL(error_message, '') as error_message FROM videos_requested WHERE user_id = ? ORDER BY created_at DESC", userID)
+	err = h.db.Select(&videos, `
+		SELECT id, phase_of_generation, output_language, downloaded,
+		       IFNULL(bunny_video_url, '') as bunny_video_url,
+		       IFNULL(bunny_audio_url, '') as bunny_audio_url,
+		       CASE WHEN caption_segments IS NOT NULL AND caption_segments != '' THEN TRUE ELSE FALSE END as has_caption_segments,
+		       created_at, IFNULL(error_message, '') as error_message
+		FROM videos_requested WHERE user_id = ? ORDER BY created_at DESC`, userID)
 	if err != nil {
 		// Backward compatibility: older schemas may not have error_message yet.
 		if mysqlErr, ok := err.(*mysql.MySQLError); ok && mysqlErr.Number == 1054 {

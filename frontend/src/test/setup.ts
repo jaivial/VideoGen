@@ -2,7 +2,7 @@ import '@testing-library/jest-dom/vitest'
 import { vi } from 'vitest'
 
 // Mock window.URL.createObjectURL
-const mockCreateObjectURL = vi.fn((file: Blob | MediaSource) => `blob:${file.type}/${Date.now()}`)
+const mockCreateObjectURL = vi.fn((file: Blob) => `blob:${file.type || 'application/octet-stream'}/${Date.now()}`)
 const mockRevokeObjectURL = vi.fn()
 
 Object.defineProperty(window, 'URL', {
@@ -29,22 +29,19 @@ Object.defineProperty(window, 'matchMedia', {
 })
 
 // Mock requestAnimationFrame
-global.requestAnimationFrame = vi.fn((callback: FrameRequestCallback) => {
+globalThis.requestAnimationFrame = vi.fn((callback: FrameRequestCallback) => {
   return setTimeout(callback, 0) as unknown as number
 })
-global.cancelAnimationFrame = vi.fn((id: number) => clearTimeout(id))
+globalThis.cancelAnimationFrame = vi.fn((id: number) => clearTimeout(id))
 
 // Mock scrollTo
-Element.prototype.scrollTo = vi.fn()
+Object.defineProperty(Element.prototype, 'scrollTo', {
+  writable: true,
+  value: vi.fn(),
+})
 
 // Mock getBoundingClientRect
-Element.prototype.getBoundingClientRect = vi.fn(() => ({
-  width: 100,
-  height: 100,
-  top: 0,
-  left: 0,
-  bottom: 0,
-  right: 0,
-  x: 0,
-  y: 0,
-}))
+Object.defineProperty(Element.prototype, 'getBoundingClientRect', {
+  writable: true,
+  value: vi.fn(() => new DOMRect(0, 0, 100, 100)),
+})

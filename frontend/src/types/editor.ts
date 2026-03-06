@@ -24,6 +24,47 @@ export const RESOLUTIONS: Resolution[] = [
   { width: 1080, height: 1080, label: '1:1 (Square)' },
 ]
 
+export interface CompositionPreset {
+  id: string
+  label: string
+  description: string
+  resolution: Resolution
+  frameRate: number
+}
+
+export const COMPOSITION_PRESETS: CompositionPreset[] = [
+  {
+    id: 'landscape',
+    label: 'Landscape 16:9',
+    description: 'YouTube and widescreen',
+    resolution: RESOLUTIONS[0],
+    frameRate: 30,
+  },
+  {
+    id: 'portrait',
+    label: 'Portrait 9:16',
+    description: 'TikTok, Shorts, Reels',
+    resolution: RESOLUTIONS[3],
+    frameRate: 30,
+  },
+  {
+    id: 'square',
+    label: 'Square 1:1',
+    description: 'Feeds and promos',
+    resolution: RESOLUTIONS[4],
+    frameRate: 30,
+  },
+  {
+    id: 'cinema-4k',
+    label: 'Cinema 4K',
+    description: 'Master export',
+    resolution: RESOLUTIONS[2],
+    frameRate: 60,
+  },
+]
+
+export const getResolutionValue = (resolution: Resolution) => `${resolution.width}x${resolution.height}`
+
 // Base clip interface
 export interface BaseClip {
   id: string
@@ -128,22 +169,42 @@ export interface Transition extends Effect {
 }
 
 // Caption styling
+export type CaptionPosition = 'top' | 'center' | 'bottom'
+export type CaptionAlignment = 'left' | 'center' | 'right'
+export type CaptionAnimation = 'none' | 'fade' | 'typewriter' | 'pop' | 'slide-up' | 'slide-down'
+export type CaptionTextTransform = 'none' | 'uppercase' | 'lowercase' | 'capitalize'
+export type CaptionBoxStyle = 'none' | 'solid' | 'pill'
+
 export interface CaptionStyle {
   fontFamily: string
   fontSize: number
   fontWeight: number
+  italic: boolean
+  underline: boolean
+  textTransform: CaptionTextTransform
+  letterSpacing: number
+  opacity: number
   color: string
   backgroundColor: string
   backgroundOpacity: number
+  boxStyle: CaptionBoxStyle
+  paddingX: number
+  paddingY: number
+  borderRadius: number
   strokeColor: string
   strokeWidth: number
   shadowColor: string
   shadowBlur: number
   shadowOffsetX: number
   shadowOffsetY: number
-  position: 'top' | 'center' | 'bottom'
-  alignment: 'left' | 'center' | 'right'
-  animation: 'none' | 'fade' | 'typewriter' | 'pop' | 'slide-up' | 'slide-down'
+  position: CaptionPosition
+  alignment: CaptionAlignment
+  offsetX: number
+  offsetY: number
+  maxWidthPercent: number
+  animation: CaptionAnimation
+  animationDuration: number
+  animationStrength: number
   lineHeight: number
 }
 
@@ -151,9 +212,18 @@ export const DEFAULT_CAPTION_STYLE: CaptionStyle = {
   fontFamily: 'Arial',
   fontSize: 32,
   fontWeight: 400,
+  italic: false,
+  underline: false,
+  textTransform: 'none',
+  letterSpacing: 0,
+  opacity: 1,
   color: '#ffffff',
   backgroundColor: '#000000',
   backgroundOpacity: 0,
+  boxStyle: 'solid',
+  paddingX: 24,
+  paddingY: 12,
+  borderRadius: 18,
   strokeColor: '#000000',
   strokeWidth: 2,
   shadowColor: '#000000',
@@ -162,9 +232,91 @@ export const DEFAULT_CAPTION_STYLE: CaptionStyle = {
   shadowOffsetY: 2,
   position: 'bottom',
   alignment: 'center',
+  offsetX: 0,
+  offsetY: 0,
+  maxWidthPercent: 84,
   animation: 'fade',
+  animationDuration: 0.35,
+  animationStrength: 0.8,
   lineHeight: 1.4,
 }
+
+export interface CaptionStylePreset {
+  id: string
+  label: string
+  description: string
+  style: Partial<CaptionStyle>
+}
+
+export const CAPTION_STYLE_PRESETS: CaptionStylePreset[] = [
+  {
+    id: 'documentary',
+    label: 'Documentary',
+    description: 'Clean centered captions with subtle support box',
+    style: {
+      fontFamily: 'Arial',
+      fontSize: 34,
+      fontWeight: 500,
+      backgroundOpacity: 0.35,
+      paddingX: 28,
+      paddingY: 12,
+      strokeWidth: 1,
+      shadowBlur: 6,
+      position: 'bottom',
+      alignment: 'center',
+    },
+  },
+  {
+    id: 'podcast',
+    label: 'Podcast',
+    description: 'Readable lower-third style with roomy line spacing',
+    style: {
+      fontFamily: 'Helvetica',
+      fontSize: 30,
+      fontWeight: 600,
+      letterSpacing: 0.4,
+      lineHeight: 1.5,
+      backgroundOpacity: 0.5,
+      paddingX: 26,
+      paddingY: 14,
+      maxWidthPercent: 78,
+    },
+  },
+  {
+    id: 'bold-social',
+    label: 'Bold Social',
+    description: 'Punchy promo style with stronger outline and motion',
+    style: {
+      fontFamily: 'Verdana',
+      fontSize: 38,
+      fontWeight: 800,
+      textTransform: 'uppercase',
+      strokeWidth: 3,
+      backgroundOpacity: 0,
+      shadowBlur: 10,
+      animation: 'pop',
+      animationDuration: 0.28,
+      animationStrength: 1,
+    },
+  },
+  {
+    id: 'lower-third',
+    label: 'Lower Third',
+    description: 'Left-aligned presenter captions with anchored layout',
+    style: {
+      fontFamily: 'Georgia',
+      fontSize: 28,
+      fontWeight: 600,
+      alignment: 'left',
+      position: 'bottom',
+      offsetX: -180,
+      maxWidthPercent: 48,
+      backgroundOpacity: 0.7,
+      paddingX: 20,
+      paddingY: 10,
+    },
+  },
+]
 
 // Text overlay (not tied to timeline)
 export interface TextOverlay {

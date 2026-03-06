@@ -131,6 +131,7 @@ func main() {
 
 		r.Get("/auth/me", authHandler.Me)
 		r.Post("/video/generate", videoHandler.Generate)
+		r.Post("/video/extract-document", videoHandler.ExtractDocument)
 		r.Get("/video/status", videoHandler.Status)
 		r.Get("/video/list", videoHandler.List)
 		r.Post("/video/mark-downloaded", videoHandler.MarkDownloaded)
@@ -142,6 +143,9 @@ func main() {
 		r.Post("/editor/upload-media", editorHandler.UploadMedia)
 		r.Post("/editor/video/{id}/process", editorHandler.ProcessVideo)
 		r.Get("/editor/video/{id}/assets", editorHandler.GetVideoAssets)
+		r.Post("/editor/project/save", editorHandler.SaveProject)
+		r.Get("/editor/projects", editorHandler.ListProjects)
+		r.Get("/editor/project/{id}", editorHandler.LoadProject)
 		// Rendering can take longer than typical API calls.
 		r.With(middleware.Timeout(10*time.Minute)).Post("/editor/video/{id}/render", editorHandler.RenderVideo)
 	})
@@ -156,6 +160,11 @@ func main() {
 	r.Get("/ws/video/{id}", func(w http.ResponseWriter, r *http.Request) {
 		// Upgrade to WebSocket
 		wsHandler.ServeHTTP(w, r)
+	})
+
+	// Editor collaboration WebSocket
+	r.Get("/ws/editor/{projectId}", func(w http.ResponseWriter, r *http.Request) {
+		wsHandler.ServeEditorHTTP(w, r)
 	})
 
 	// Serve static files in production

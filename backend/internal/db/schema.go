@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS videos_requested (
     editor_caption_segments LONGTEXT,
     editor_audio_segments LONGTEXT,
     editor_image_segments LONGTEXT,
+    caption_segments JSON,
     download_expires_at TIMESTAMP,
     downloaded BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -98,6 +99,16 @@ CREATE TABLE IF NOT EXISTS images_generated (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
     FOREIGN KEY (video_requested_id) REFERENCES videos_requested(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS projects (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    user_id BIGINT UNSIGNED NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    data JSON,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS video_edition_composition (
@@ -168,6 +179,7 @@ func ensureVideosRequestedColumns(db *sqlx.DB) error {
 		{name: "editor_caption_segments", definition: "LONGTEXT NULL"},
 		{name: "editor_audio_segments", definition: "LONGTEXT NULL"},
 		{name: "editor_image_segments", definition: "LONGTEXT NULL"},
+		{name: "caption_segments", definition: "JSON NULL"},
 	}
 
 	for _, column := range required {

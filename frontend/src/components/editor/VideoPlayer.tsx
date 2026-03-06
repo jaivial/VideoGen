@@ -1,5 +1,6 @@
-import { useRef, useEffect, useCallback, useMemo, useState, type CSSProperties } from 'react'
+import { useRef, useEffect, useCallback, useMemo, useState } from 'react'
 import { useEditorStore, useCurrentTime, useIsPlaying, useDuration } from '../../stores/editorStore'
+import { getCaptionPreviewState } from './captionPreview'
 
 interface VideoPlayerProps {
   className?: string
@@ -33,90 +34,6 @@ function getVisualFilterCSS(clip: any): string {
   return cssParts.join(' ')
 }
 
-function hexToRgba(color: string | undefined, alpha: number): string {
-  const normalizedAlpha = clamp(alpha, 0, 1)
-  if (!color) return `rgba(0, 0, 0, ${normalizedAlpha})`
-
-  const hex = color.trim().replace('#', '')
-  if (!/^[0-9a-fA-F]+$/.test(hex)) {
-    return color
-  }
-
-  const expanded = hex.length === 3
-    ? hex.split('').map((part) => `${part}${part}`).join('')
-    : hex
-
-  if (expanded.length !== 6) {
-    return color
-  }
-
-  const r = parseInt(expanded.slice(0, 2), 16)
-  const g = parseInt(expanded.slice(2, 4), 16)
-  const b = parseInt(expanded.slice(4, 6), 16)
-  return `rgba(${r}, ${g}, ${b}, ${normalizedAlpha})`
-}
-
-function getCaptionStyle(caption: any): CSSProperties {
-  const style = caption?.style || {}
-  const alignment = style.alignment === 'left' || style.alignment === 'right' ? style.alignment : 'center'
-  const position = style.position === 'top' || style.position === 'center' ? style.position : 'bottom'
-
-  const fontSize = clamp(Number(style.fontSize) || 32, 14, 120)
-  const fontWeight = clamp(Number(style.fontWeight) || 500, 300, 900)
-  const strokeWidth = clamp(Number(style.strokeWidth) || 0, 0, 8)
-  const lineHeight = clamp(Number(style.lineHeight) || 1.25, 1, 2.2)
-  const backgroundOpacity = clamp(Number(style.backgroundOpacity) || 0, 0, 1)
-
-  const visual: CSSProperties = {
-    position: 'absolute',
-    maxWidth: '84%',
-    color: style.color || '#ffffff',
-    fontSize: `${fontSize}px`,
-    fontWeight,
-    textAlign: alignment,
-    lineHeight,
-    whiteSpace: 'pre-wrap',
-    wordBreak: 'break-word',
-    textShadow: '0 2px 8px rgba(0,0,0,0.65)',
-  }
-
-  if (strokeWidth > 0) {
-    visual.WebkitTextStroke = `${strokeWidth}px ${style.strokeColor || '#000000'}`
-  }
-
-  if (backgroundOpacity > 0) {
-    visual.background = hexToRgba(style.backgroundColor || '#000000', backgroundOpacity)
-    visual.padding = '0.35em 0.6em'
-    visual.borderRadius = '0.4em'
-  }
-
-  const transforms: string[] = []
-
-  if (alignment === 'left') {
-    visual.left = '8%'
-  } else if (alignment === 'right') {
-    visual.right = '8%'
-  } else {
-    visual.left = '50%'
-    transforms.push('translateX(-50%)')
-  }
-
-  if (position === 'top') {
-    visual.top = '7%'
-  } else if (position === 'center') {
-    visual.top = '50%'
-    transforms.push('translateY(-50%)')
-  } else {
-    visual.bottom = '7%'
-  }
-
-  if (transforms.length > 0) {
-    visual.transform = transforms.join(' ')
-  }
-
-  return visual
-}
-
 export function VideoPlayer({ className = '' }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const audioRef = useRef<HTMLAudioElement>(null)
@@ -132,6 +49,8 @@ export function VideoPlayer({ className = '' }: VideoPlayerProps) {
   const currentTime = useCurrentTime()
   const isPlaying = useIsPlaying()
   const duration = useDuration()
+  const project = useEditorStore((state) => state.project)
+  const totalClips = useEditorStore((state) => state.tracks.reduce((count, track) => count + track.clips.length, 0))
 
   const { setCurrentTime, setIsPlaying, togglePlayPause } = useEditorStore()
 
@@ -481,14 +400,10 @@ export function VideoPlayer({ className = '' }: VideoPlayerProps) {
   // Get visual URL and metadata from active clip (fallback to first visual clip)
   const firstVisual = (visualClips as any[])[0] ?? null
   const visualUrl = activeClip?.url || firstVisual?.url || null
-  const originalWidth = (activeClip as any)?.originalWidth ?? firstVisual?.originalWidth
-  const originalHeight = (activeClip as any)?.originalHeight ?? firstVisual?.originalHeight
   const visualFilter = useMemo(() => getVisualFilterCSS(activeClip), [activeClip])
 
-  // Calculate aspect ratio from original video dimensions
-  const aspectRatio = originalWidth && originalHeight
-    ? originalWidth / originalHeight
-    : 16 / 9
+  // Always preview inside the composition canvas, not the source media aspect ratio.
+  const aspectRatio = project.resolution.width / Math.max(1, project.resolution.height)
 
   return (
     <div
@@ -525,11 +440,26 @@ export function VideoPlayer({ className = '' }: VideoPlayerProps) {
         </div>
       ) : (
         <div className="absolute inset-0 flex items-center justify-center text-gray-400">
-          <div className="text-center">
+          <div className="text-center max-w-md px-6">
             <svg className="w-16 h-16 mx-auto mb-2 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
             </svg>
-            <p className="text-sm">No video loaded</p>
+            <p className="text-sm text-white">No video loaded</p>
+            <p className="text-xs text-white/50 mt-2">Set up your composition, then drop media into the timeline to preview your FFmpeg render.</p>
+            <div className="mt-4 grid grid-cols-3 gap-2 text-[11px] text-white/70">
+              <div className="rounded-lg border border-white/10 bg-white/5 px-3 py-2">
+                <div className="text-white/40 uppercase tracking-wide">Canvas</div>
+                <div>{project.resolution.width}×{project.resolution.height}</div>
+              </div>
+              <div className="rounded-lg border border-white/10 bg-white/5 px-3 py-2">
+                <div className="text-white/40 uppercase tracking-wide">FPS</div>
+                <div>{project.frameRate}</div>
+              </div>
+              <div className="rounded-lg border border-white/10 bg-white/5 px-3 py-2">
+                <div className="text-white/40 uppercase tracking-wide">Items</div>
+                <div>{totalClips}</div>
+              </div>
+            </div>
           </div>
         </div>
       )}
@@ -538,11 +468,14 @@ export function VideoPlayer({ className = '' }: VideoPlayerProps) {
       {/* Captions overlay */}
       {activeCaptions.length > 0 && (
         <div className="absolute inset-0 z-10 pointer-events-none">
-          {activeCaptions.map((caption: any) => (
-            <div key={caption.id} style={getCaptionStyle(caption)}>
-              {caption.text}
+          {activeCaptions.map((caption: any) => {
+            const preview = getCaptionPreviewState(caption, currentTime)
+            return (
+            <div key={caption.id} style={preview.style}>
+              {preview.text}
             </div>
-          ))}
+            )
+          })}
         </div>
       )}
 

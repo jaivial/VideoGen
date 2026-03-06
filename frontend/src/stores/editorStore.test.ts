@@ -12,19 +12,6 @@ describe('editorStore', () => {
     }
   }
 
-  // Helper to reset store to a clean state
-  const resetStore = () => {
-    const state = useEditorStore.getState()
-    // Reset by reloading - but for testing we can just use the actions
-    // to set things back to known state
-    state.setCurrentTime(0)
-    state.setDuration(0)
-    state.setZoom(50)
-    state.setScrollX(0)
-    state.deselectAll()
-    state.selectTrack(null)
-  }
-
   beforeEach(() => {
     clearAllClips()
 
@@ -460,6 +447,22 @@ describe('editorStore', () => {
       useEditorStore.getState().setScrollX(-50)
 
       expect(useEditorStore.getState().scrollX).toBe(0)
+    })
+  })
+
+  describe('caption styles', () => {
+    it('creates captions with the richer default style payload', () => {
+      useEditorStore.getState().addCaption(0, 2.5, 'Styled caption')
+
+      const captionTrack = useEditorStore.getState().tracks.find((track) => track.type === 'caption')!
+      const caption = captionTrack.clips[0] as any
+
+      expect(caption.type).toBe('caption')
+      expect(caption.style.fontFamily).toBe('Arial')
+      expect(caption.style.letterSpacing).toBeDefined()
+      expect(caption.style.maxWidthPercent).toBeDefined()
+      expect(caption.style.paddingX).toBeDefined()
+      expect(caption.style.animationDuration).toBeDefined()
     })
   })
 })

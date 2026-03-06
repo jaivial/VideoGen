@@ -189,6 +189,18 @@ describe('Timeline', () => {
       // Zoom should increase
       expect(useEditorStore.getState().zoom).toBeGreaterThan(50)
     })
+
+    it('should adjust zoom with toolbar buttons', () => {
+      useEditorStore.getState().setZoom(50)
+
+      render(<Timeline />)
+
+      fireEvent.click(screen.getByRole('button', { name: /zoom in/i }))
+      expect(useEditorStore.getState().zoom).toBe(60)
+
+      fireEvent.click(screen.getByRole('button', { name: /zoom out/i }))
+      expect(useEditorStore.getState().zoom).toBe(50)
+    })
   })
 
   describe('timeline navigation', () => {

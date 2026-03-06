@@ -44,6 +44,70 @@ describe('VideoPlayer', () => {
       expect(screen.getByText('No video loaded')).toBeInTheDocument()
     })
 
+    it('uses the project composition aspect ratio when no media is loaded', () => {
+      useEditorStore.getState().setProjectResolution({ width: 1080, height: 1920, label: 'Portrait' })
+
+      render(<VideoPlayer />)
+
+      const player = document.querySelector('.relative.bg-black.rounded-lg') as HTMLDivElement | null
+      expect(player).toBeInTheDocument()
+      expect(player?.style.aspectRatio).toBe('0.5625')
+    })
+
+    it('applies richer caption styling in the preview overlay', () => {
+      useEditorStore.getState().setDuration(5)
+      useEditorStore.getState().addCaption(0, 4, 'Styled caption')
+
+      const captionTrack = useEditorStore.getState().tracks.find((track) => track.type === 'caption')!
+      const caption = captionTrack.clips[0] as any
+      useEditorStore.getState().updateClip(caption.id, {
+        style: {
+          ...caption.style,
+          italic: true,
+          underline: true,
+          textTransform: 'uppercase',
+          letterSpacing: 2.5,
+          maxWidthPercent: 62,
+          paddingX: 32,
+          paddingY: 16,
+          backgroundOpacity: 0.5,
+        },
+      } as any)
+
+      render(<VideoPlayer />)
+
+      const captionNode = screen.getByText('STYLED CAPTION')
+      expect(captionNode).toHaveStyle({
+        fontStyle: 'italic',
+        textDecoration: 'underline',
+        textTransform: 'uppercase',
+        letterSpacing: '2.5px',
+        maxWidth: '62%',
+        padding: '16px 32px',
+      })
+    })
+
+    it('renders typewriter motion progressively in the preview', () => {
+      useEditorStore.getState().setDuration(5)
+      useEditorStore.getState().addCaption(0, 4, 'Animated caption')
+
+      const captionTrack = useEditorStore.getState().tracks.find((track) => track.type === 'caption')!
+      const caption = captionTrack.clips[0] as any
+      useEditorStore.getState().updateClip(caption.id, {
+        style: {
+          ...caption.style,
+          animation: 'typewriter',
+          animationDuration: 2,
+        },
+      } as any)
+      useEditorStore.getState().setCurrentTime(1)
+
+      render(<VideoPlayer />)
+
+      expect(screen.queryByText('Animated caption')).not.toBeInTheDocument()
+      expect(screen.getByText('Animated')).toBeInTheDocument()
+    })
+
     it('should extract video URL from first video track clip', () => {
       const store = useEditorStore
       const state = store.getState()

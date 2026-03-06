@@ -16,6 +16,7 @@ import (
 type WSMessage struct {
 	Type          string      `json:"type"`
 	VideoID       uint64      `json:"video_id,omitempty"`
+	ProjectID     uint64      `json:"project_id,omitempty"`
 	Timestamp     string      `json:"timestamp,omitempty"`
 	Phase         string      `json:"phase,omitempty"`
 	Step          string      `json:"step,omitempty"`
@@ -27,6 +28,14 @@ type WSMessage struct {
 	ElementIndex  int         `json:"element_index,omitempty"`
 	ElementTotal  int         `json:"element_total,omitempty"`
 	ElementStatus string      `json:"element_status,omitempty"`
+	UserID        uint64      `json:"user_id,omitempty"`
+}
+
+type EditorSession struct {
+	ProjectID uint64
+	Clients   map[*websocket.Conn]uint64
+	State     json.RawMessage
+	Mu        sync.RWMutex
 }
 
 type wsClient struct {
@@ -52,18 +61,117 @@ type WebSocketHandler struct {
 	clientsMux    sync.RWMutex
 	allClients    map[*wsClient]struct{}
 	allClientsMux sync.RWMutex
-	upgrader   websocket.Upgrader
+	editorRooms   map[uint64]*EditorSession
+	editorMux     sync.RWMutex
+	upgrader      websocket.Upgrader
 }
 
 func NewWebSocketHandler() *WebSocketHandler {
 	return &WebSocketHandler{
-		clients:    make(map[uint64]map[*wsClient]struct{}),
-		allClients: make(map[*wsClient]struct{}),
+		clients:     make(map[uint64]map[*wsClient]struct{}),
+		allClients:  make(map[*wsClient]struct{}),
+		editorRooms: make(map[uint64]*EditorSession),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				return true // Allow all origins in dev
 			},
 		},
+	}
+}
+
+func (h *WebSocketHandler) JoinEditorSession(projectID uint64, conn *websocket.Conn, userID uint64) {
+	h.editorMux.Lock()
+	defer h.editorMux.Unlock()
+
+	session, exists := h.editorRooms[projectID]
+	if !exists {
+		session = &EditorSession{
+			ProjectID: projectID,
+			Clients:   make(map[*websocket.Conn]uint64),
+		}
+		h.editorRooms[projectID] = session
+	}
+
+	session.Mu.Lock()
+	session.Clients[conn] = userID
+	session.Mu.Unlock()
+}
+
+func (h *WebSocketHandler) LeaveEditorSession(projectID uint64, conn *websocket.Conn) {
+	h.editorMux.Lock()
+	defer h.editorMux.Unlock()
+
+	session, exists := h.editorRooms[projectID]
+	if !exists {
+		return
+	}
+
+	session.Mu.Lock()
+	delete(session.Clients, conn)
+	empty := len(session.Clients) == 0
+	session.Mu.Unlock()
+
+	if empty {
+		delete(h.editorRooms, projectID)
+	}
+}
+
+func (h *WebSocketHandler) BroadcastToEditor(projectID uint64, msg WSMessage) {
+	h.editorMux.RLock()
+	session, exists := h.editorRooms[projectID]
+	h.editorMux.RUnlock()
+	if !exists {
+		return
+	}
+
+	data, err := json.Marshal(msg)
+	if err != nil {
+		log.Printf("Failed to marshal editor WS message: %v", err)
+		return
+	}
+
+	session.Mu.RLock()
+	defer session.Mu.RUnlock()
+
+	for conn := range session.Clients {
+		if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+			log.Printf("Failed to broadcast editor WS message: %v", err)
+		}
+	}
+}
+
+func (h *WebSocketHandler) UpdateEditorState(projectID uint64, state json.RawMessage, senderConn *websocket.Conn) {
+	h.editorMux.RLock()
+	session, exists := h.editorRooms[projectID]
+	h.editorMux.RUnlock()
+	if !exists {
+		return
+	}
+
+	session.Mu.Lock()
+	session.State = state
+	session.Mu.Unlock()
+
+	data, err := json.Marshal(WSMessage{
+		Type:      "state_update",
+		ProjectID: projectID,
+		Payload:   state,
+	})
+	if err != nil {
+		log.Printf("Failed to marshal editor state update: %v", err)
+		return
+	}
+
+	session.Mu.RLock()
+	defer session.Mu.RUnlock()
+
+	for conn := range session.Clients {
+		if conn == senderConn {
+			continue
+		}
+		if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+			log.Printf("Failed to send editor state update: %v", err)
+		}
 	}
 }
 
@@ -131,6 +239,95 @@ func (h *WebSocketHandler) BroadcastToAll(msg WSMessage) {
 			log.Printf("Failed to write WS message to client: %v", err)
 			client.conn.Close()
 			h.UnregisterAllConnection(client)
+		}
+	}
+}
+
+func (h *WebSocketHandler) ServeEditorHTTP(w http.ResponseWriter, r *http.Request) {
+	projectIDStr := chi.URLParam(r, "projectId")
+	projectID, err := strconv.ParseUint(projectIDStr, 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid project ID", http.StatusBadRequest)
+		return
+	}
+
+	userID := uint64(1)
+
+	conn, err := h.upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("Editor WebSocket upgrade failed: %v", err)
+		return
+	}
+
+	defer func() {
+		h.LeaveEditorSession(projectID, conn)
+		conn.Close()
+	}()
+
+	h.JoinEditorSession(projectID, conn, userID)
+
+	h.editorMux.RLock()
+	session := h.editorRooms[projectID]
+	h.editorMux.RUnlock()
+	if session != nil {
+		session.Mu.RLock()
+		state := session.State
+		session.Mu.RUnlock()
+		if len(state) > 0 {
+			_ = conn.WriteJSON(WSMessage{
+				Type:      "state_sync",
+				ProjectID: projectID,
+				Payload:   state,
+			})
+		}
+	}
+
+	for {
+		_, message, err := conn.ReadMessage()
+		if err != nil {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				log.Printf("Editor WebSocket error: %v", err)
+			}
+			break
+		}
+
+		var msg WSMessage
+		if err := json.Unmarshal(message, &msg); err != nil {
+			continue
+		}
+
+		switch msg.Type {
+		case "state_update":
+			state, _ := json.Marshal(msg.Payload)
+			h.UpdateEditorState(projectID, state, conn)
+		case "cursor_move":
+			msg.Type = "cursor_update"
+			msg.ProjectID = projectID
+			msg.UserID = userID
+			h.editorMux.RLock()
+			session := h.editorRooms[projectID]
+			h.editorMux.RUnlock()
+			if session == nil {
+				continue
+			}
+
+			data, err := json.Marshal(msg)
+			if err != nil {
+				continue
+			}
+
+			session.Mu.RLock()
+			for c := range session.Clients {
+				if c == conn {
+					continue
+				}
+				if err := c.WriteMessage(websocket.TextMessage, data); err != nil {
+					log.Printf("Failed to send editor cursor update: %v", err)
+				}
+			}
+			session.Mu.RUnlock()
+		case "ping":
+			_ = conn.WriteJSON(WSMessage{Type: "pong"})
 		}
 	}
 }

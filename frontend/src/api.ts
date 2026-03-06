@@ -1,8 +1,21 @@
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8080'
-const WS_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8080'
+const API_URL = import.meta.env.VITE_API_URL || ''
+const WS_URL = import.meta.env.VITE_WS_URL || ''
+
+function resolveAPIUrl(endpoint: string) {
+  return API_URL ? `${API_URL}${endpoint}` : endpoint
+}
+
+function resolveWebSocketUrl(path: string) {
+  if (WS_URL) {
+    return `${WS_URL}${path}`
+  }
+
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  return `${protocol}//${window.location.host}${path}`
+}
 
 async function fetchAPI(endpoint: string, options: RequestInit = {}) {
-  const url = `${API_URL}${endpoint}`
+  const url = resolveAPIUrl(endpoint)
 
   const response = await fetch(url, {
     ...options,
@@ -67,13 +80,31 @@ export const api = {
   getLanguages: () =>
     fetchAPI('/api/video/languages'),
 
+  extractDocument: async (file: File) => {
+    const formData = new FormData()
+    formData.append('file', file)
+
+		const response = await fetch(resolveAPIUrl('/api/video/extract-document'), {
+      method: 'POST',
+      credentials: 'include',
+      body: formData,
+    })
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => '')
+      throw new Error(text || 'Document upload failed')
+    }
+
+    return response.json()
+  },
+
   // Editor
   uploadMedia: async (file: File, type: string) => {
     const formData = new FormData()
     formData.append('file', file)
     formData.append('type', type)
 
-    const response = await fetch(`${API_URL}/api/editor/upload-media`, {
+		const response = await fetch(resolveAPIUrl('/api/editor/upload-media'), {
       method: 'POST',
       credentials: 'include',
       body: formData,
@@ -101,7 +132,7 @@ export const api = {
     fetchAPI(`/api/editor/video/${videoId}/assets`),
 
   renderEditedVideo: async (videoId: string, data: any) => {
-    const response = await fetch(`${API_URL}/api/editor/video/${videoId}/render`, {
+		const response = await fetch(resolveAPIUrl(`/api/editor/video/${videoId}/render`), {
       method: 'POST',
       credentials: 'include',
       headers: {
@@ -117,10 +148,22 @@ export const api = {
 
     return response.blob()
   },
+
+	saveProject: (name: string, project: any) =>
+		fetchAPI('/api/editor/project/save', {
+			method: 'POST',
+			body: JSON.stringify({ name, project }),
+		}),
+
+	listProjects: () =>
+		fetchAPI('/api/editor/projects'),
+
+	loadProject: (projectId: string) =>
+		fetchAPI(`/api/editor/project/${projectId}`),
 }
 
 export function connectWebSocket(videoId: string, onMessage: (data: any) => void) {
-  const ws = new WebSocket(`${WS_URL}/ws/video/${videoId}`)
+	const ws = new WebSocket(resolveWebSocketUrl(`/ws/video/${videoId}`))
 
   ws.onopen = () => {
     console.log('WebSocket connected')

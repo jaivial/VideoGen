@@ -25,6 +25,10 @@ type VideoLogger struct {
 
 // NewVideoLogger creates a new logger for a specific video
 func NewVideoLogger(videoDir string, videoID uint64) (*VideoLogger, error) {
+	// Ensure the directory exists
+	if err := os.MkdirAll(videoDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create log directory: %w", err)
+	}
 	logPath := filepath.Join(videoDir, fmt.Sprintf("video_%d.log", videoID))
 	f, err := os.Create(logPath)
 	if err != nil {
@@ -904,6 +908,49 @@ func (w *VideoWorker) ProcessVideo(videoRequestID, userID uint64, videoURL, tran
 	`, filename, uploadURL, dbAudioURL, string(captionSegmentsJSON), string(audioSegmentsJSON), string(imageSegmentsJSON), expiresAt, videoRequestID)
 	if err != nil {
 		log.Printf("Failed to update video request: %v", err)
+	}
+
+	// Upload audio and save caption segments to database
+	// Read caption info that was already read earlier (at line 570)
+	// The captionInfo struct is already available - re-read for clarity
+	audioCaptionPath := filepath.Join(videoDir, "caption_info.json")
+	audioCaptionData, readErr := os.ReadFile(audioCaptionPath)
+	if readErr == nil {
+		var audioCaptionInfo struct {
+			AudioPath        string                    `json:"audioPath"`
+			CaptionSegments  []services.CaptionSegment `json:"captionSegments"`
+		}
+		if json.Unmarshal(audioCaptionData, &audioCaptionInfo) == nil && audioCaptionInfo.AudioPath != "" {
+			// Upload audio to Bunny
+			audioFileData, audioErr := os.ReadFile(audioCaptionInfo.AudioPath)
+			if audioErr == nil {
+				audioFileName := fmt.Sprintf("%d_audio.wav", videoRequestID)
+				audioFileURL, uploadErr := w.bunny.UploadMedia(audioFileName, audioFileData, "audio")
+				if uploadErr == nil {
+					log.Printf("Uploaded audio to: %s", audioFileURL)
+
+					// Save caption segments as JSON
+					captionSegJSON, _ := json.Marshal(audioCaptionInfo.CaptionSegments)
+
+					// Update database with audio URL and caption segments
+					_, dbErr := w.db.Exec(`
+						UPDATE videos_requested
+						SET bunny_audio_url = ?,
+							caption_segments = ?
+						WHERE id = ?
+					`, audioFileURL, string(captionSegJSON), videoRequestID)
+					if dbErr != nil {
+						log.Printf("Failed to update audio URL and caption segments: %v", dbErr)
+					}
+				} else {
+					log.Printf("Failed to upload audio: %v", uploadErr)
+				}
+			} else {
+				log.Printf("Failed to read audio file: %v", audioErr)
+			}
+		}
+	} else {
+		log.Printf("Warning: could not read caption info file: %v", readErr)
 	}
 
 	// Broadcast completion

@@ -5,17 +5,26 @@ import type {
   EditorState,
   Track,
   Clip,
+	AudioClip,
   CaptionClip,
   MediaItem,
   VideoClip,
   TextOverlay,
   EditorTool,
+  Resolution,
 } from '../types/editor'
-import { RESOLUTIONS } from '../types/editor'
+import { DEFAULT_CAPTION_STYLE, RESOLUTIONS } from '../types/editor'
+
+type NewClip =
+	| Omit<VideoClip, 'id' | 'trackId'>
+	| Omit<AudioClip, 'id' | 'trackId'>
+	| Omit<CaptionClip, 'id' | 'trackId'>
 
 interface EditorStore extends EditorState {
   // Project actions
   setProjectName: (name: string) => void
+  setProjectResolution: (resolution: Resolution) => void
+  setProjectFrameRate: (frameRate: number) => void
   setDuration: (duration: number) => void
 
   // Playback actions
@@ -32,7 +41,7 @@ interface EditorStore extends EditorState {
   reorderTracks: (startIndex: number, endIndex: number) => void
 
   // Clip actions
-  addClip: (trackId: string, clip: Omit<Clip, 'id' | 'trackId'>) => void
+	addClip: (trackId: string, clip: NewClip) => void
   updateClip: (clipId: string, updates: Partial<Clip>, options?: { commit?: boolean }) => void
   removeClip: (clipId: string) => void
   moveClip: (clipId: string, newTrackId: string, newStartTime: number) => void
@@ -242,24 +251,7 @@ const normalizeClipTiming = (clip: Clip, updates: Partial<Clip>) => {
   }
 }
 
-const createDefaultCaptionStyle = () => ({
-  fontFamily: 'Arial',
-  fontSize: 32,
-  fontWeight: 400,
-  color: '#ffffff',
-  backgroundColor: '#000000',
-  backgroundOpacity: 0,
-  strokeColor: '#000000',
-  strokeWidth: 2,
-  shadowColor: '#000000',
-  shadowBlur: 4,
-  shadowOffsetX: 2,
-  shadowOffsetY: 2,
-  position: 'bottom' as const,
-  alignment: 'center' as const,
-  animation: 'fade' as const,
-  lineHeight: 1.4,
-})
+const createDefaultCaptionStyle = () => ({ ...DEFAULT_CAPTION_STYLE })
 
 const splitCaptionLines = (translatedLines?: string[], transcribedText?: string): string[] => {
   const fromTranslated = (translatedLines || [])
@@ -363,10 +355,24 @@ export const useEditorStore = create<EditorStore>()(
         state.project.updatedAt = Date.now()
       }),
 
+    setProjectResolution: (resolution) =>
+      set((state) => {
+        state.project.resolution = resolution
+        state.project.updatedAt = Date.now()
+      }),
+
+    setProjectFrameRate: (frameRate) =>
+      set((state) => {
+        state.project.frameRate = Math.max(1, Math.round(frameRate))
+        state.project.updatedAt = Date.now()
+      }),
+
     setDuration: (duration) =>
       set((state) => {
-        state.duration = duration
-        state.project.duration = duration
+        const nextDuration = Math.max(0, duration)
+        state.duration = nextDuration
+        state.project.duration = nextDuration
+        state.project.updatedAt = Date.now()
       }),
 
     // Playback
@@ -583,24 +589,7 @@ export const useEditorStore = create<EditorStore>()(
             trimEnd: endTime - startTime,
             url: '',
             text,
-            style: {
-              fontFamily: 'Arial',
-              fontSize: 32,
-              fontWeight: 400,
-              color: '#ffffff',
-              backgroundColor: '#000000',
-              backgroundOpacity: 0,
-              strokeColor: '#000000',
-              strokeWidth: 2,
-              shadowColor: '#000000',
-              shadowBlur: 4,
-              shadowOffsetX: 2,
-              shadowOffsetY: 2,
-              position: 'bottom',
-              alignment: 'center',
-              animation: 'fade',
-              lineHeight: 1.4,
-            },
+            style: createDefaultCaptionStyle(),
           }
           captionTrack.clips.push(newCaption)
 

@@ -79,18 +79,36 @@ type EditorRenderEffect struct {
 }
 
 type EditorCaptionStyle struct {
+	FontFamily        string  `json:"fontFamily"`
 	FontSize          float64 `json:"fontSize"`
+	FontWeight        float64 `json:"fontWeight"`
+	Italic            bool    `json:"italic"`
+	Underline         bool    `json:"underline"`
+	TextTransform     string  `json:"textTransform"`
+	LetterSpacing     float64 `json:"letterSpacing"`
+	Opacity           float64 `json:"opacity"`
 	LineHeight        float64 `json:"lineHeight"`
 	Color             string  `json:"color"`
 	BackgroundColor   string  `json:"backgroundColor"`
 	BackgroundOpacity float64 `json:"backgroundOpacity"`
+	BoxStyle          string  `json:"boxStyle"`
+	PaddingX          float64 `json:"paddingX"`
+	PaddingY          float64 `json:"paddingY"`
+	BorderRadius      float64 `json:"borderRadius"`
 	StrokeColor       string  `json:"strokeColor"`
 	StrokeWidth       float64 `json:"strokeWidth"`
 	ShadowColor       string  `json:"shadowColor"`
+	ShadowBlur        float64 `json:"shadowBlur"`
 	ShadowOffsetX     float64 `json:"shadowOffsetX"`
 	ShadowOffsetY     float64 `json:"shadowOffsetY"`
 	Position          string  `json:"position"`  // "top" | "center" | "bottom"
 	Alignment         string  `json:"alignment"` // "left" | "center" | "right"
+	OffsetX           float64 `json:"offsetX"`
+	OffsetY           float64 `json:"offsetY"`
+	MaxWidthPercent   float64 `json:"maxWidthPercent"`
+	Animation         string  `json:"animation"`
+	AnimationDuration float64 `json:"animationDuration"`
+	AnimationStrength float64 `json:"animationStrength"`
 }
 
 type renderSegment struct {
@@ -368,43 +386,20 @@ func (s *EditorRenderService) RenderTimeline(ctx context.Context, videoRequested
 	if len(captionClips) > 0 {
 		sort.Slice(captionClips, func(i, j int) bool { return captionClips[i].StartTime < captionClips[j].StartTime })
 
-		for i := range captionClips {
-			caption := captionClips[i]
-			text := strings.TrimSpace(caption.Text)
-			if text == "" {
-				continue
-			}
-
-			style := normalizeCaptionStyle(caption.Style)
-			start := clampFloat(caption.StartTime, 0, math.MaxFloat64)
-			end := start + clampFloat(caption.Duration, 0.05, math.MaxFloat64)
-
-			chain := fmt.Sprintf(
-				"%sdrawtext=text='%s':fontsize=%d:fontcolor=%s:borderw=%s:bordercolor=%s:shadowcolor=%s:shadowx=%s:shadowy=%s:x=%s:y=%s:line_spacing=%s:enable='between(t,%s,%s)'",
-				finalVideoLabel,
-				escapeDrawtextCaptionText(text),
-				style.fontSize,
-				style.fontColor,
-				ffFloat(style.strokeWidth),
-				style.strokeColor,
-				style.shadowColor,
-				ffFloat(style.shadowX),
-				ffFloat(style.shadowY),
-				style.xExpr,
-				style.yExpr,
-				ffFloat(style.lineSpacing),
-				ffFloat(start),
-				ffFloat(end),
-			)
-			if style.boxOpacity > 0 {
-				chain += fmt.Sprintf(":box=1:boxcolor=%s@%s:boxborderw=10", style.boxColor, ffFloat(style.boxOpacity))
-			}
-
-			outLabel := fmt.Sprintf("vcap%d", i)
-			chain += fmt.Sprintf("[%s]", outLabel)
-			filterParts = append(filterParts, chain)
-			finalVideoLabel = fmt.Sprintf("[%s]", outLabel)
+		captionASSPath, err := os.CreateTemp(s.tempDir, "editor-captions-*.ass")
+		if err != nil {
+			return "", "", fmt.Errorf("create caption ass temp file: %w", err)
 		}
+		captionASSPath.Close()
+		defer os.Remove(captionASSPath.Name())
+
+		if err := GenerateEditorCaptionASSFile(captionClips, captionASSPath.Name(), w, h); err != nil {
+			return "", "", fmt.Errorf("generate caption ass file: %w", err)
+		}
+
+		outLabel := "vcap_ass"
+		filterParts = append(filterParts, fmt.Sprintf("%ssubtitles='%s'[%s]", finalVideoLabel, escapeFFmpegFilterPath(captionASSPath.Name()), outLabel))
+		finalVideoLabel = fmt.Sprintf("[%s]", outLabel)
 	}
 
 	filter := strings.Join(filterParts, ";")

@@ -1,6 +1,8 @@
-import { useState, useEffect, useMemo, useRef } from 'react'
+import { useState, useEffect, useMemo, useRef, type ChangeEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api, connectWebSocket } from '../../api'
+import { AppNavigation } from '../../components/AppNavigation'
+import { CustomSelect } from '../../components/ui/CustomSelect'
 
 // Available voices for Qwen3 TTS
 const AVAILABLE_VOICES = [
@@ -30,6 +32,16 @@ const SUPPORTED_LANGUAGES = [
   { code: 'ru', name: 'Russian' },
 ]
 
+const LANGUAGE_OPTIONS = SUPPORTED_LANGUAGES.map((lang) => ({
+  value: lang.code,
+  label: lang.name,
+}))
+
+const VOICE_OPTIONS = AVAILABLE_VOICES.map((voice) => ({
+  value: voice.id,
+  label: `${voice.name} - ${voice.description}`,
+}))
+
 // Default style instruction
 const DEFAULT_STYLE_INSTRUCTION = "A warm, engaging narrator voice. Moderate pace, storytelling style, professional audiobook narrator quality. Expressive but not dramatic, perfect for educational content. Consistent tone and rhythm throughout. Clear diction, confident delivery."
 
@@ -46,6 +58,7 @@ interface VideoStatus {
 }
 
 type Step = 1 | 2 | 3 | 4 | 5  // 1=transcript, 2=language, 3=voice, 4=loading, 5=completed
+type TranscriptInputMode = 'paste' | 'upload'
 
 // Helper functions at module level
 function getPhaseLabel(phase: string) {
@@ -81,6 +94,10 @@ function getPhaseProgress(phase: string) {
 export default function Generate() {
   const navigate = useNavigate()
   const [transcribedText, setTranscribedText] = useState('')
+  const [transcriptInputMode, setTranscriptInputMode] = useState<TranscriptInputMode>('paste')
+  const [uploadedDocument, setUploadedDocument] = useState<{ name: string; type: string } | null>(null)
+  const [documentError, setDocumentError] = useState('')
+  const [isExtractingDocument, setIsExtractingDocument] = useState(false)
   const [language, setLanguage] = useState('en')
   const [voice, setVoice] = useState('Vivian')
   const [styleInstruction, setStyleInstruction] = useState(DEFAULT_STYLE_INSTRUCTION)
@@ -92,7 +109,7 @@ export default function Generate() {
   const [error, setError] = useState('')
   const [previewVideo, setPreviewVideo] = useState<{id: number; url: string; expiresAt?: string} | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
-  const completionTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  const completionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // Theme colors
   const colors = darkMode ? {
@@ -238,6 +255,31 @@ export default function Generate() {
     }
   }
 
+  const handleDocumentUpload = async (event: ChangeEvent<HTMLInputElement>) => {
+		const file = event.target.files?.[0]
+		if (!file) {
+			return
+		}
+
+		setDocumentError('')
+		setUploadedDocument(null)
+		setIsExtractingDocument(true)
+
+		try {
+			const result = await api.extractDocument(file)
+			setTranscribedText(result.text || '')
+			setUploadedDocument({
+				name: result.filename || file.name,
+				type: result.file_type || '',
+			})
+		} catch (err: any) {
+			setDocumentError(err.message || 'Failed to extract document')
+		} finally {
+			setIsExtractingDocument(false)
+			event.target.value = ''
+		}
+	}
+
   const handleDownload = async (videoId: number) => {
     try {
       const s = await api.getVideoStatus(String(videoId))
@@ -311,6 +353,9 @@ export default function Generate() {
     }
     setCurrentStep(1)
     setTranscribedText('')
+    setTranscriptInputMode('paste')
+    setUploadedDocument(null)
+    setDocumentError('')
     setLanguage('en')
     setVoice('Vivian')
     setStatus(null)
@@ -329,63 +374,144 @@ export default function Generate() {
     return (
       <div key={animationKey} className="fade-transition">
         {currentStep === 1 && (
-          <div>
-            <label htmlFor="transcribedText" className="block text-sm font-medium mb-2">
-              Step 1: Enter Your Transcript Text
-            </label>
-            <textarea
-              id="transcribedText"
-              value={transcribedText}
-              onChange={(e) => setTranscribedText(e.target.value)}
-              className="w-full px-4 py-3 rounded-lg border transition-colors focus:outline-none focus:ring-2"
-              style={{
-                backgroundColor: colors.bg,
-                borderColor: colors.border,
-                color: colors.text,
-                '--tw-ring-color': colors.primary,
-              } as any}
-              placeholder="Paste the transcribed text from your video here..."
-              required
-              rows={6}
-            />
-            <p className="mt-2 text-sm" style={{ color: colors.textSecondary }}>
-              Tip: Use{' '}
-              <a
-                href="https://youtubetranscript.com/"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="underline font-medium"
-                style={{ color: colors.primary }}
+          <div className="space-y-5">
+            <div className="flex gap-3 rounded-xl p-1" style={{ backgroundColor: colors.bg }}>
+              <button
+                type="button"
+                onClick={() => {
+                  setTranscriptInputMode('paste')
+                  setDocumentError('')
+                }}
+                className="flex-1 rounded-lg px-4 py-2 text-sm font-medium transition-colors"
+                style={{
+                  backgroundColor: transcriptInputMode === 'paste' ? colors.primary : 'transparent',
+                  color: transcriptInputMode === 'paste' ? '#fff' : colors.textSecondary,
+                }}
               >
-                YouTube Transcript
-              </a>{' '}
-              to get the transcript from any YouTube video.
-            </p>
+                Paste transcript
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setTranscriptInputMode('upload')
+                  setDocumentError('')
+                }}
+                className="flex-1 rounded-lg px-4 py-2 text-sm font-medium transition-colors"
+                style={{
+                  backgroundColor: transcriptInputMode === 'upload' ? colors.primary : 'transparent',
+                  color: transcriptInputMode === 'upload' ? '#fff' : colors.textSecondary,
+                }}
+              >
+                Upload file
+              </button>
+            </div>
+
+            {transcriptInputMode === 'upload' && (
+              <div
+                className="rounded-xl border p-4"
+                style={{ borderColor: colors.border, backgroundColor: colors.bg }}
+              >
+                <div className="space-y-3">
+                  <div>
+                    <label htmlFor="transcriptUpload" className="block text-sm font-medium mb-2">
+                      Upload transcript file
+                    </label>
+                    <input
+                      id="transcriptUpload"
+                      type="file"
+                      accept=".txt,.md,.docx,.pdf"
+                      onChange={handleDocumentUpload}
+                      disabled={isExtractingDocument}
+                      className="block w-full text-sm"
+                    />
+                  </div>
+
+                  <p className="text-sm" style={{ color: colors.textSecondary }}>
+                    Supported formats: TXT, MD, DOCX, and text-based PDF.
+                  </p>
+
+                  {isExtractingDocument && (
+                    <p className="text-sm font-medium" style={{ color: colors.primary }}>
+                      Extracting text from your file...
+                    </p>
+                  )}
+
+                  {uploadedDocument && (
+                    <p className="text-sm font-medium" style={{ color: colors.text }}>
+                      {uploadedDocument.name}
+                    </p>
+                  )}
+
+                  {documentError && (
+                    <p className="text-sm" style={{ color: colors.error }}>
+                      {documentError}
+                    </p>
+                  )}
+                </div>
+              </div>
+            )}
+
+            <div>
+              <label htmlFor="transcribedText" className="block text-sm font-medium mb-2">
+                Transcript Text
+              </label>
+              <textarea
+                id="transcribedText"
+                value={transcribedText}
+                onChange={(e) => setTranscribedText(e.target.value)}
+                className="w-full px-4 py-3 rounded-lg border transition-colors focus:outline-none focus:ring-2"
+                style={{
+                  backgroundColor: colors.bg,
+                  borderColor: colors.border,
+                  color: colors.text,
+                  '--tw-ring-color': colors.primary,
+                } as any}
+                placeholder={transcriptInputMode === 'upload' ? 'Uploaded text will appear here for review and editing...' : 'Paste the transcribed text from your video here...'}
+                required
+                rows={8}
+              />
+              <p className="mt-2 text-sm" style={{ color: colors.textSecondary }}>
+                {transcriptInputMode === 'upload' ? 'Review the extracted text before continuing.' : (
+                  <>
+                    Tip: Use{' '}
+                    <a
+                      href="https://youtubetranscript.com/"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="underline font-medium"
+                      style={{ color: colors.primary }}
+                    >
+                      YouTube Transcript
+                    </a>{' '}
+                    to get the transcript from any YouTube video.
+                  </>
+                )}
+              </p>
+            </div>
           </div>
         )}
 
         {currentStep === 2 && (
           <div>
-            <label htmlFor="language" className="block text-sm font-medium mb-2">
-              Step 2: Select Output Language
-            </label>
-            <select
+            <CustomSelect
               id="language"
+              label="Step 2: Select Output Language"
               value={language}
-              onChange={(e) => setLanguage(e.target.value)}
-              className="w-full px-4 py-3 rounded-lg border transition-colors focus:outline-none focus:ring-2"
-              style={{
+              onChange={setLanguage}
+              options={LANGUAGE_OPTIONS}
+              labelClassName="block text-sm font-medium mb-2"
+              labelStyle={{ color: colors.text }}
+              triggerClassName="w-full px-4 py-3 rounded-lg border transition-colors flex items-center justify-between gap-3"
+              triggerStyle={{
                 backgroundColor: colors.bg,
                 borderColor: colors.border,
                 color: colors.text,
               } as any}
-            >
-              {SUPPORTED_LANGUAGES.map((lang) => (
-                <option key={lang.code} value={lang.code}>
-                  {lang.name}
-                </option>
-              ))}
-            </select>
+              menuStyle={{
+                backgroundColor: colors.card,
+                borderColor: colors.border,
+              } as any}
+            />
             <p className="mt-2 text-sm" style={{ color: colors.textSecondary }}>
               The video will be generated in this language.
             </p>
@@ -395,26 +521,25 @@ export default function Generate() {
         {currentStep === 3 && (
           <div className="space-y-4">
             <div>
-              <label htmlFor="voice" className="block text-sm font-medium mb-2">
-                Step 3: Select Voice
-              </label>
-              <select
+              <CustomSelect
                 id="voice"
+                label="Step 3: Select Voice"
                 value={voice}
-                onChange={(e) => setVoice(e.target.value)}
-                className="w-full px-4 py-3 rounded-lg border transition-colors focus:outline-none focus:ring-2"
-                style={{
+                onChange={setVoice}
+                options={VOICE_OPTIONS}
+                labelClassName="block text-sm font-medium mb-2"
+                labelStyle={{ color: colors.text }}
+                triggerClassName="w-full px-4 py-3 rounded-lg border transition-colors flex items-center justify-between gap-3"
+                triggerStyle={{
                   backgroundColor: colors.bg,
                   borderColor: colors.border,
                   color: colors.text,
                 } as any}
-              >
-                {AVAILABLE_VOICES.map((v) => (
-                  <option key={v.id} value={v.id}>
-                    {v.name} - {v.description}
-                  </option>
-                ))}
-              </select>
+                menuStyle={{
+                  backgroundColor: colors.card,
+                  borderColor: colors.border,
+                } as any}
+              />
             </div>
 
             <div>
@@ -457,62 +582,15 @@ export default function Generate() {
 
   return (
     <div className="min-h-screen" style={{ backgroundColor: colors.bg, color: colors.text }}>
-      {/* Navigation */}
-      <nav className="border-b" style={{ borderColor: colors.border, backgroundColor: colors.card }}>
-        <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex justify-between h-16">
-            <div className="flex items-center gap-3">
-              <svg className="w-8 h-8" fill="none" stroke={colors.primary} viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
-              </svg>
-              <span className="text-xl font-bold" style={{ color: colors.primary }}>
-                VideoGen
-              </span>
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => {
-                  setDarkMode(!darkMode)
-                  document.documentElement.classList.toggle('dark', !darkMode)
-                }}
-                className="p-2 rounded-lg transition-colors"
-                style={{ backgroundColor: colors.border }}
-              >
-                {darkMode ? (
-                  <svg className="w-5 h-5" fill="none" stroke={colors.text} viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
-                  </svg>
-                ) : (
-                  <svg className="w-5 h-5" fill="none" stroke={colors.text} viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
-                  </svg>
-                )}
-              </button>
-              <a
-                href="/generate"
-                className="px-4 py-2 rounded-lg font-medium transition-colors"
-                style={{ backgroundColor: colors.primary, color: darkMode ? colors.bg : '#fff' }}
-              >
-                Generate
-              </a>
-              <a
-                href="/library"
-                className="px-4 py-2 rounded-lg font-medium transition-colors"
-                style={{ color: colors.textSecondary }}
-              >
-                My Library
-              </a>
-              <a
-                href="/settings"
-                className="px-4 py-2 rounded-lg font-medium transition-colors"
-                style={{ color: colors.textSecondary }}
-              >
-                Settings
-              </a>
-            </div>
-          </div>
-        </div>
-      </nav>
+      <AppNavigation
+        colors={colors}
+        darkMode={darkMode}
+        activeTab="generate"
+        onToggleDarkMode={() => {
+          setDarkMode(!darkMode)
+          document.documentElement.classList.toggle('dark', !darkMode)
+        }}
+      />
 
       <div className="max-w-3xl mx-auto py-8 px-4 sm:px-6 lg:px-8">
         {/* Step Indicator */}
@@ -731,7 +809,7 @@ function LoadingStep({ status, colors, error }: { status: VideoStatus | null; co
               background: `linear-gradient(90deg, ${colors.primary}, ${colors.accent})`,
             }}
           >
-            <LoadingBarParticles colors={colors} />
+            <LoadingBarParticles />
           </div>
         </div>
 
@@ -753,7 +831,7 @@ function LoadingStep({ status, colors, error }: { status: VideoStatus | null; co
   )
 }
 
-function LoadingBarParticles({ colors }: { colors: any }) {
+function LoadingBarParticles() {
   const particles = useMemo(
     () => ({
       bubbles: Array.from({ length: 10 }, (_, i) => ({

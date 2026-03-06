@@ -222,6 +222,7 @@ func (h *EditorHandler) GetVideoAssets(w http.ResponseWriter, r *http.Request) {
 		EditorCaptionSegments string `db:"editor_caption_segments"`
 		EditorAudioSegments   string `db:"editor_audio_segments"`
 		EditorImageSegments   string `db:"editor_image_segments"`
+		CaptionSegments       string `db:"caption_segments"`
 		TranscribedText       string `db:"transcribed_text"`
 		OutputLanguage        string `db:"output_language"`
 	}
@@ -232,6 +233,7 @@ func (h *EditorHandler) GetVideoAssets(w http.ResponseWriter, r *http.Request) {
 		       IFNULL(editor_caption_segments, '') as editor_caption_segments,
 		       IFNULL(editor_audio_segments, '') as editor_audio_segments,
 		       IFNULL(editor_image_segments, '') as editor_image_segments,
+		       IFNULL(caption_segments, '') as caption_segments,
 		       IFNULL(transcribed_text, '') as transcribed_text,
 		       output_language
 		FROM videos_requested WHERE id = ?`, videoID)
@@ -315,6 +317,9 @@ func (h *EditorHandler) GetVideoAssets(w http.ResponseWriter, r *http.Request) {
 	captionSegments := []map[string]interface{}{}
 	if strings.TrimSpace(video.EditorCaptionSegments) != "" {
 		_ = json.Unmarshal([]byte(video.EditorCaptionSegments), &captionSegments)
+	}
+	if len(captionSegments) == 0 && strings.TrimSpace(video.CaptionSegments) != "" {
+		_ = json.Unmarshal([]byte(video.CaptionSegments), &captionSegments)
 	}
 
 	audioSegments := []map[string]interface{}{}
@@ -434,4 +439,108 @@ func (h *EditorHandler) RenderVideo(w http.ResponseWriter, r *http.Request) {
 		// Client disconnected or network error; nothing else to do.
 		return
 	}
+}
+
+// SaveProject handles POST /api/editor/project/save
+func (h *EditorHandler) SaveProject(w http.ResponseWriter, r *http.Request) {
+	userID, err := h.auth.GetSessionUser(w, r)
+	if err != nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	var req struct {
+		Name    string          `json:"name"`
+		Project json.RawMessage `json:"project"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if req.Name == "" {
+		req.Name = "Untitled Project"
+	}
+
+	result, err := h.db.Exec(
+		"INSERT INTO projects (user_id, name, data) VALUES (?, ?, ?)",
+		userID, req.Name, req.Project,
+	)
+	if err != nil {
+		http.Error(w, "Failed to save project", http.StatusInternalServerError)
+		return
+	}
+
+	projectID, _ := result.LastInsertId()
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"project_id": projectID,
+		"name":       req.Name,
+		"message":    "Project saved successfully",
+	})
+}
+
+// ListProjects handles GET /api/editor/projects
+func (h *EditorHandler) ListProjects(w http.ResponseWriter, r *http.Request) {
+	userID, err := h.auth.GetSessionUser(w, r)
+	if err != nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	type ProjectItem struct {
+		ID        uint64    `db:"id" json:"id"`
+		Name      string    `db:"name" json:"name"`
+		CreatedAt time.Time `db:"created_at" json:"created_at"`
+		UpdatedAt time.Time `db:"updated_at" json:"updated_at"`
+	}
+
+	var projects []ProjectItem
+	err = h.db.Select(&projects, "SELECT id, name, created_at, updated_at FROM projects WHERE user_id = ? ORDER BY updated_at DESC", userID)
+	if err != nil {
+		http.Error(w, "Failed to list projects", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(projects)
+}
+
+// LoadProject handles GET /api/editor/project/{id}
+func (h *EditorHandler) LoadProject(w http.ResponseWriter, r *http.Request) {
+	userID, err := h.auth.GetSessionUser(w, r)
+	if err != nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	projectIDStr := chi.URLParam(r, "id")
+	projectID, err := strconv.ParseUint(projectIDStr, 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid project ID", http.StatusBadRequest)
+		return
+	}
+
+	var project struct {
+		UserID uint64 `db:"user_id"`
+		Name   string `db:"name"`
+		Data   string `db:"data"`
+	}
+	err = h.db.Get(&project, "SELECT user_id, name, data FROM projects WHERE id = ?", projectID)
+	if err != nil {
+		http.Error(w, "Project not found", http.StatusNotFound)
+		return
+	}
+	if project.UserID != userID {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"id":      projectID,
+		"name":    project.Name,
+		"project": json.RawMessage(project.Data),
+	})
 }

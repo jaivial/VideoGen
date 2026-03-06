@@ -1,6 +1,6 @@
 import { DndContext, DragEndEvent, DragOverlay, DragStartEvent, PointerSensor, useSensor, useSensors } from '@dnd-kit/core'
 import { useMemo, useState, useCallback, useEffect, useRef } from 'react'
-import { PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen } from 'lucide-react'
+import { PanelLeftClose, PanelRightClose } from 'lucide-react'
 import { VideoPlayer, Timeline, Toolbar, MediaPanel, CaptionsPanel, EffectsPanel, ExportPanel, PropertiesPanel } from './index'
 import { useEditorStore, useActivePanel } from '../../stores/editorStore'
 
@@ -36,6 +36,13 @@ interface VideoMetadata {
   height: number
   fps: number
   thumbnailUrl?: string
+}
+
+interface PreviewWorkspaceProps {
+  layoutVersion: string
+  workspaceClassName: string
+  stageClassName: string
+  testId?: string
 }
 
 // Extract full metadata from video element
@@ -111,10 +118,72 @@ const extractVideoMetadata = (url: string): Promise<VideoMetadata> => {
   })
 }
 
+const fitPreviewStage = (containerWidth: number, containerHeight: number, aspectRatio: number) => {
+  const safeWidth = Math.max(0, containerWidth)
+  const safeHeight = Math.max(0, containerHeight)
+  const inset = Math.min(56, Math.max(24, Math.min(safeWidth, safeHeight) * 0.08))
+  const availableWidth = Math.max(160, safeWidth - inset * 2)
+  const availableHeight = Math.max(160, safeHeight - inset * 2)
+
+  let width = availableWidth
+  let height = width / aspectRatio
+
+  if (height > availableHeight) {
+    height = availableHeight
+    width = height * aspectRatio
+  }
+
+  return {
+    width: Math.round(width),
+    height: Math.round(height),
+  }
+}
+
+function PreviewWorkspace({ layoutVersion, workspaceClassName, stageClassName, testId }: PreviewWorkspaceProps) {
+  const project = useEditorStore((state) => state.project)
+  const workspaceRef = useRef<HTMLDivElement | null>(null)
+  const [stageSize, setStageSize] = useState({ width: 0, height: 0 })
+
+  useEffect(() => {
+    const updateStageSize = () => {
+      const workspace = workspaceRef.current
+      if (!workspace) return
+
+      const bounds = workspace.getBoundingClientRect()
+      const aspectRatio = project.resolution.width / Math.max(1, project.resolution.height)
+      setStageSize(fitPreviewStage(bounds.width, bounds.height, aspectRatio))
+    }
+
+    updateStageSize()
+    const rafId = requestAnimationFrame(updateStageSize)
+    window.addEventListener('resize', updateStageSize)
+
+    return () => {
+      cancelAnimationFrame(rafId)
+      window.removeEventListener('resize', updateStageSize)
+    }
+  }, [layoutVersion, project.resolution.height, project.resolution.width])
+
+  return (
+    <div
+      ref={workspaceRef}
+      data-testid={testId}
+      className={workspaceClassName}
+    >
+      <div
+        className="relative shrink-0 transition-[width,height] duration-200 ease-out"
+        style={stageSize.width > 0 && stageSize.height > 0 ? { width: stageSize.width, height: stageSize.height } : undefined}
+      >
+        <VideoPlayer className={stageClassName} />
+      </div>
+    </div>
+  )
+}
+
 export function Editor({ videoId, videoUrl, videoDuration = 60, initialAssets }: EditorProps) {
   const activePanel = useActivePanel()
 
-  const { initializeFromVideo, setActivePanel, removeClip, duplicateClip, setActiveTool, selectedClipIds, undo, redo, canUndo, canRedo, project, setProjectName } = useEditorStore()
+  const { initializeFromVideo, setActivePanel, removeClip, duplicateClip, setActiveTool, selectedClipIds, undo, redo, canUndo, canRedo, project, tracks, setProjectName } = useEditorStore()
 
   const [activeDragId, setActiveDragId] = useState<string | null>(null)
   const initialized = useRef(false)
@@ -125,6 +194,7 @@ export function Editor({ videoId, videoUrl, videoDuration = 60, initialAssets }:
   const [mobilePanel, setMobilePanel] = useState<null | 'tools' | 'inspector'>(null)
   const [leftSidebarOpen, setLeftSidebarOpen] = useState(true)
   const [rightSidebarOpen, setRightSidebarOpen] = useState(true)
+  const clipCount = useMemo(() => tracks.reduce((count, track) => count + track.clips.length, 0), [tracks])
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -449,7 +519,7 @@ export function Editor({ videoId, videoUrl, videoDuration = 60, initialAssets }:
                 onChange={(e) => setProjectName(e.target.value)}
                 className="w-full bg-transparent text-sm font-semibold outline-none truncate"
               />
-              <div className="text-[11px] text-white/50 truncate">CapCut-like timeline + FFmpeg export</div>
+              <div className="text-[11px] text-white/50 truncate">FFmpeg composition studio</div>
             </div>
           </div>
 
@@ -551,33 +621,65 @@ export function Editor({ videoId, videoUrl, videoDuration = 60, initialAssets }:
             )}
 
             <main className="col-start-3 row-start-1 min-w-0 min-h-0 flex flex-col bg-[#0b0c10] relative">
-              {!leftSidebarOpen && (
-                <button
-                  onClick={() => setLeftSidebarOpen(true)}
-                  className="absolute top-3 left-3 z-20 px-3 py-2 rounded-xl bg-[#0f1117] border border-white/10 text-white/80 hover:text-white hover:bg-white/10 flex items-center gap-2"
-                  title="Show media library"
-                >
-                  <PanelLeftOpen className="w-4 h-4" />
-                  <span className="text-xs">Media Library</span>
-                </button>
-              )}
-              {!rightSidebarOpen && (
-                <button
-                  onClick={() => setRightSidebarOpen(true)}
-                  className="absolute top-3 right-3 z-20 px-3 py-2 rounded-xl bg-[#0f1117] border border-white/10 text-white/80 hover:text-white hover:bg-white/10 flex items-center gap-2"
-                  title="Show properties"
-                >
-                  <span className="text-xs">Properties</span>
-                  <PanelRightOpen className="w-4 h-4" />
-                </button>
-              )}
+              <Toolbar
+                testId="editor-toolbar"
+                leftSidebarOpen={leftSidebarOpen}
+                rightSidebarOpen={rightSidebarOpen}
+                onOpenLeftSidebar={() => setLeftSidebarOpen(true)}
+                onOpenRightSidebar={() => setRightSidebarOpen(true)}
+              />
 
-              <Toolbar />
+              <div className="px-3 lg:px-4 pt-3">
+                <div className="rounded-2xl border border-white/10 bg-[#11151e] px-4 py-3 flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+                  <div className="flex flex-wrap items-center gap-2 text-xs">
+                    <span className="px-2.5 py-1 rounded-full bg-cyan-500/10 text-cyan-200 border border-cyan-500/20">
+                      {project.resolution.label}
+                    </span>
+                    <span className="px-2.5 py-1 rounded-full bg-white/5 text-white/70 border border-white/10">
+                      {project.resolution.width}×{project.resolution.height}
+                    </span>
+                    <span className="px-2.5 py-1 rounded-full bg-white/5 text-white/70 border border-white/10">
+                      {project.frameRate} fps
+                    </span>
+                    <span className="px-2.5 py-1 rounded-full bg-white/5 text-white/70 border border-white/10">
+                      {project.duration.toFixed(1)}s timeline
+                    </span>
+                    <span className="px-2.5 py-1 rounded-full bg-white/5 text-white/70 border border-white/10">
+                      {clipCount} items
+                    </span>
+                  </div>
 
-              <div className="flex-1 min-h-0 p-3 lg:p-4 flex items-center justify-center">
-                <div className="w-full max-w-[1400px]">
-                  <VideoPlayer className="shadow-[0_30px_80px_rgba(0,0,0,0.55)] border border-white/10" />
+                  <div className="flex flex-wrap items-center gap-2">
+                    {[
+                      { id: 'media', label: 'Media' },
+                      { id: 'captions', label: 'Captions' },
+                      { id: 'effects', label: 'Effects' },
+                      { id: 'export', label: 'Render' },
+                    ].map((action) => (
+                      <button
+                        key={action.id}
+                        type="button"
+                        onClick={() => setActivePanel(action.id as any)}
+                        className={`px-3 py-2 rounded-xl text-xs border transition-colors ${
+                          activePanel === action.id
+                            ? 'bg-white/10 border-white/20 text-white'
+                            : 'bg-white/0 border-white/10 text-white/60 hover:text-white hover:bg-white/5'
+                        }`}
+                      >
+                        {action.label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
+              </div>
+
+              <div className="flex-1 min-h-0 p-3 lg:p-4">
+                <PreviewWorkspace
+                  testId="preview-workspace"
+                  layoutVersion={`${timelineHeight}:${leftSidebarOpen}:${rightSidebarOpen}:${project.resolution.width}x${project.resolution.height}`}
+                  workspaceClassName="h-full min-h-[320px] rounded-[28px] border border-white/10 bg-[radial-gradient(circle_at_top,_rgba(36,42,62,0.95),_rgba(12,14,20,0.98))] p-4 lg:p-6 flex items-center justify-center overflow-hidden"
+                  stageClassName="w-full h-full shadow-[0_30px_80px_rgba(0,0,0,0.55)] border border-white/10"
+                />
               </div>
             </main>
 
@@ -620,10 +722,46 @@ export function Editor({ videoId, videoUrl, videoDuration = 60, initialAssets }:
             <main className="min-w-0 min-h-0 flex-1 flex flex-col bg-[#0b0c10]">
               <Toolbar />
 
-              <div className="flex-1 min-h-0 p-3 flex items-center justify-center">
-                <div className="w-full">
-                  <VideoPlayer className="shadow-[0_30px_80px_rgba(0,0,0,0.55)] border border-white/10" />
+              <div className="px-3 pt-3">
+                <div className="rounded-2xl border border-white/10 bg-[#11151e] px-4 py-3 space-y-3">
+                  <div className="flex flex-wrap items-center gap-2 text-xs text-white/70">
+                    <span className="px-2.5 py-1 rounded-full bg-cyan-500/10 text-cyan-200 border border-cyan-500/20">{project.resolution.label}</span>
+                    <span>{project.resolution.width}×{project.resolution.height}</span>
+                    <span>•</span>
+                    <span>{project.frameRate} fps</span>
+                    <span>•</span>
+                    <span>{clipCount} items</span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {[
+                      { id: 'media', label: 'Media' },
+                      { id: 'captions', label: 'Captions' },
+                      { id: 'effects', label: 'Effects' },
+                      { id: 'export', label: 'Render' },
+                    ].map((action) => (
+                      <button
+                        key={action.id}
+                        type="button"
+                        onClick={() => setActivePanel(action.id as any)}
+                        className={`px-3 py-2 rounded-xl text-xs border ${
+                          activePanel === action.id
+                            ? 'bg-white/10 border-white/20 text-white'
+                            : 'bg-white/0 border-white/10 text-white/60'
+                        }`}
+                      >
+                        {action.label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
+              </div>
+
+              <div className="flex-1 min-h-0 p-3">
+                <PreviewWorkspace
+                  layoutVersion={`${timelineHeight}:mobile:${project.resolution.width}x${project.resolution.height}`}
+                  workspaceClassName="h-full min-h-[260px] rounded-[24px] border border-white/10 bg-[radial-gradient(circle_at_top,_rgba(36,42,62,0.95),_rgba(12,14,20,0.98))] p-3 flex items-center justify-center overflow-hidden"
+                  stageClassName="w-full h-full shadow-[0_30px_80px_rgba(0,0,0,0.55)] border border-white/10"
+                />
               </div>
 
               <div className="border-t border-white/10 relative bg-[#0f1117]" style={{ height: timelineHeight }}>

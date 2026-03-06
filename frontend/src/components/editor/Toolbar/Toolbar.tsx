@@ -1,7 +1,16 @@
+import { PanelLeftOpen, PanelRightOpen } from 'lucide-react'
 import { useEditorStore, useActiveTool, useIsPlaying, useCurrentTime, useDuration, useSelectedClips } from '../../../stores/editorStore'
 import type { EditorTool } from '../../../types/editor'
 
-export function Toolbar() {
+interface ToolbarProps {
+  leftSidebarOpen?: boolean
+  rightSidebarOpen?: boolean
+  onOpenLeftSidebar?: () => void
+  onOpenRightSidebar?: () => void
+  testId?: string
+}
+
+export function Toolbar({ leftSidebarOpen = true, rightSidebarOpen = true, onOpenLeftSidebar, onOpenRightSidebar, testId }: ToolbarProps = {}) {
   const activeTool = useActiveTool()
   const isPlaying = useIsPlaying()
   const currentTime = useCurrentTime()
@@ -57,9 +66,21 @@ export function Toolbar() {
   // This effect should be handled at a higher level, but for now we just render the toolbar
 
   return (
-    <div className="flex items-center justify-between px-4 py-2 bg-gray-800 border-b border-gray-700">
+    <div data-testid={testId} className="flex items-center justify-between gap-3 px-4 py-2 bg-gray-800 border-b border-gray-700">
       {/* Left: Tools */}
-      <div className="flex items-center gap-1">
+      <div className="flex items-center gap-1 min-w-0">
+        {!leftSidebarOpen && onOpenLeftSidebar && (
+          <button
+            type="button"
+            onClick={onOpenLeftSidebar}
+            title="Show media library"
+            className="px-3 py-2 rounded-md text-sm text-gray-300 hover:text-white hover:bg-gray-700 border border-gray-700 flex items-center gap-2"
+          >
+            <PanelLeftOpen className="w-4 h-4" />
+            <span className="hidden xl:inline">Media Library</span>
+          </button>
+        )}
+
         {/* Tool buttons */}
         <div className="flex items-center gap-0.5 bg-gray-700 rounded-lg p-0.5">
           {tools.map((tool) => (
@@ -188,7 +209,19 @@ export function Toolbar() {
       </div>
 
       {/* Right: Add track / Export */}
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 shrink-0">
+        {!rightSidebarOpen && onOpenRightSidebar && (
+          <button
+            type="button"
+            onClick={onOpenRightSidebar}
+            title="Show properties"
+            className="px-3 py-2 rounded-md text-sm text-gray-300 hover:text-white hover:bg-gray-700 border border-gray-700 flex items-center gap-2"
+          >
+            <span className="hidden xl:inline">Properties</span>
+            <PanelRightOpen className="w-4 h-4" />
+          </button>
+        )}
+
         {/* Add track menu */}
         <div className="relative group">
           <button className="px-3 py-1.5 rounded-md text-sm text-gray-300 hover:text-white hover:bg-gray-700 flex items-center gap-1">

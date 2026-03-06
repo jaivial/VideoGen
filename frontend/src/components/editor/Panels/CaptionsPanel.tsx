@@ -1,10 +1,12 @@
 import { useState } from 'react'
-import { useEditorStore, useCurrentTime } from '../../../stores/editorStore'
+import { useCurrentTime, useEditorStore, useSelectedClips } from '../../../stores/editorStore'
 import type { CaptionClip } from '../../../types/editor'
+import { CaptionStyleEditor } from './CaptionStyleEditor'
 
 export function CaptionsPanel() {
   const currentTime = useCurrentTime()
-  const { tracks, addCaption, updateCaption, removeCaption } = useEditorStore()
+  const selectedClips = useSelectedClips()
+  const { tracks, addCaption, updateCaption, removeCaption, selectClip } = useEditorStore()
 
   // Get all caption clips
   const captions = tracks
@@ -40,7 +42,11 @@ export function CaptionsPanel() {
               caption={caption}
               onUpdate={(updates) => updateCaption(caption.id, updates)}
               onDelete={() => removeCaption(caption.id)}
+              onOpenStyle={() => {
+                selectClip(caption.id)
+              }}
               isActive={currentTime >= caption.startTime && currentTime <= caption.startTime + caption.duration}
+              isSelected={selectedClips.includes(caption.id)}
             />
           ))
         )}
@@ -53,16 +59,19 @@ interface CaptionItemProps {
   caption: CaptionClip
   onUpdate: (updates: Partial<CaptionClip>) => void
   onDelete: () => void
+  onOpenStyle: () => void
   isActive: boolean
+  isSelected: boolean
 }
 
-function CaptionItem({ caption, onUpdate, onDelete, isActive }: CaptionItemProps) {
+function CaptionItem({ caption, onUpdate, onDelete, onOpenStyle, isActive, isSelected }: CaptionItemProps) {
   const [isEditing, setIsEditing] = useState(false)
+  const [showStyleEditor, setShowStyleEditor] = useState(false)
 
   return (
     <div
       className={`p-3 rounded-lg bg-gray-800 border ${
-        isActive ? 'border-blue-500' : 'border-gray-700'
+        isSelected ? 'border-fuchsia-400' : isActive ? 'border-blue-500' : 'border-gray-700'
       }`}
     >
       {/* Text input */}
@@ -106,15 +115,14 @@ function CaptionItem({ caption, onUpdate, onDelete, isActive }: CaptionItemProps
         />
         <span className="text-gray-500 text-xs">({caption.duration.toFixed(1)}s)</span>
 
-        {/* Style button */}
         <button
-          onClick={() => {/* Open style editor */}}
-          className="ml-auto p-1 text-gray-400 hover:text-white"
-          title="Edit style"
+          onClick={() => {
+            onOpenStyle()
+            setShowStyleEditor((open) => !open)
+          }}
+          className="ml-auto rounded-md border border-fuchsia-500/30 bg-fuchsia-500/10 px-2 py-1 text-[11px] font-medium text-fuchsia-200 hover:border-fuchsia-400/50 hover:text-white"
         >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 21a4 4 0 01-4-4V5a2 2 0 012-2h4a2 2 0 012 2v12a4 4 0 01-4 4zm0 0h12a2 2 0 002-2v-4a2 2 0 00-2-2h-2.343M11 7.343l1.657-1.657a2 2 0 012.828 0l2.829 2.829a2 2 0 010 2.828l-8.486 8.485M7 17h.01" />
-          </svg>
+          {showStyleEditor ? 'Hide Style' : 'Edit Style'}
         </button>
 
         {/* Delete button */}
@@ -128,6 +136,13 @@ function CaptionItem({ caption, onUpdate, onDelete, isActive }: CaptionItemProps
           </svg>
         </button>
       </div>
+
+      {showStyleEditor && (
+        <CaptionStyleEditor
+          style={caption.style}
+          onChange={(style) => onUpdate({ style })}
+        />
+      )}
     </div>
   )
 }

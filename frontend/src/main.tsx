@@ -21,6 +21,7 @@ function App() {
         <Route path="/settings" element={<Settings />} />
         <Route path="/generate" element={<Generate />} />
         <Route path="/library" element={<Library />} />
+        <Route path="/editor" element={<Editor />} />
         <Route path="/editor/:videoId" element={<Editor />} />
       </Routes>
     </BrowserRouter>

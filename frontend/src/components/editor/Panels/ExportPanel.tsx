@@ -1,17 +1,18 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useEditorStore } from '../../../stores/editorStore'
-import { RESOLUTIONS } from '../../../types/editor'
+import { COMPOSITION_PRESETS, RESOLUTIONS, getResolutionValue } from '../../../types/editor'
 import { api } from '../../../api'
+import { CustomSelect } from '../../ui/CustomSelect'
 
 interface ExportPanelProps {
   videoId?: string
 }
 
 export function ExportPanel({ videoId }: ExportPanelProps) {
-  const { duration, tracks } = useEditorStore()
+  const { duration, tracks, project } = useEditorStore()
 
-  const [resolution, setResolution] = useState('1920x1080')
-  const [frameRate, setFrameRate] = useState(30)
+  const [resolution, setResolution] = useState(getResolutionValue(project.resolution))
+  const [frameRate, setFrameRate] = useState(project.frameRate)
   const [quality, setQuality] = useState(23) // CRF value (lower = better)
   const [format, setFormat] = useState<'mp4' | 'webm'>('mp4')
   const [includeAudio, setIncludeAudio] = useState(true)
@@ -19,16 +20,43 @@ export function ExportPanel({ videoId }: ExportPanelProps) {
   const [error, setError] = useState<string | null>(null)
   const [resultUrl, setResultUrl] = useState<string | null>(null)
 
+  const QUALITY_PRESETS = [
+    { id: 'review', label: 'Review', description: 'Fast client previews', crf: 30 },
+    { id: 'standard', label: 'Standard', description: 'Balanced quality', crf: 23 },
+    { id: 'master', label: 'Master', description: 'Highest quality', crf: 18 },
+  ] as const
+
+  const resolutionOptions = RESOLUTIONS.map((res) => ({
+    value: getResolutionValue(res),
+    label: `${res.label} (${res.width}x${res.height})`,
+  }))
+
+  const frameRateOptions = [
+    { value: 24, label: '24 fps (Cinema)' },
+    { value: 30, label: '30 fps (Standard)' },
+    { value: 60, label: '60 fps (Smooth)' },
+  ]
+
   useEffect(() => {
     return () => {
       if (resultUrl?.startsWith('blob:')) URL.revokeObjectURL(resultUrl)
     }
   }, [resultUrl])
 
+  useEffect(() => {
+    setResolution(getResolutionValue(project.resolution))
+  }, [project.resolution])
+
+  useEffect(() => {
+    setFrameRate(project.frameRate)
+  }, [project.frameRate])
+
   const { width, height } = useMemo(() => {
     const [w, h] = resolution.split('x').map((v) => parseInt(v, 10))
     return { width: w || 1920, height: h || 1080 }
   }, [resolution])
+
+  const estimatedSize = Math.round(duration * (format === 'mp4' ? 1 : 0.7) * (40 - quality))
 
   const payload = useMemo(() => ({
     mode: 'export',
@@ -107,35 +135,55 @@ export function ExportPanel({ videoId }: ExportPanelProps) {
           </div>
         )}
 
-        {/* Resolution */}
-        <div>
-          <label className="block text-xs text-gray-400 mb-1">Resolution</label>
-          <select
-            value={resolution}
-            onChange={(e) => setResolution(e.target.value)}
-            className="w-full px-3 py-2 bg-gray-800 text-white text-sm rounded-lg border border-gray-700 focus:outline-none focus:border-blue-500"
-          >
-            {RESOLUTIONS.map((res) => (
-              <option key={res.label} value={`${res.width}x${res.height}`}>
-                {res.label} ({res.width}x{res.height})
-              </option>
-            ))}
-          </select>
+        <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4">
+          <div className="text-xs uppercase tracking-[0.2em] text-gray-500">Composition presets</div>
+          <div className="grid grid-cols-1 gap-2 mt-3">
+            {COMPOSITION_PRESETS.map((preset) => {
+              const presetValue = getResolutionValue(preset.resolution)
+              const isActive = resolution === presetValue
+              return (
+                <button
+                  key={preset.id}
+                  type="button"
+                  onClick={() => {
+                    setResolution(presetValue)
+                    setFrameRate(preset.frameRate)
+                  }}
+                  className={`rounded-xl border px-3 py-3 text-left transition-colors ${
+                    isActive
+                      ? 'border-cyan-400/50 bg-cyan-500/10 text-white'
+                      : 'border-gray-700 bg-gray-800/80 text-gray-300 hover:border-gray-500 hover:text-white'
+                  }`}
+                >
+                  <div className="text-sm font-medium">{preset.label}</div>
+                  <div className="text-xs text-gray-400 mt-1">{preset.description} · {preset.resolution.width}×{preset.resolution.height} · {preset.frameRate} fps</div>
+                </button>
+              )
+            })}
+          </div>
         </div>
 
+        {/* Resolution */}
+        <CustomSelect
+          id="export-resolution"
+          label="Resolution"
+          value={resolution}
+          onChange={setResolution}
+          options={resolutionOptions}
+          labelClassName="block text-xs text-gray-400 mb-1"
+          triggerClassName="w-full px-3 py-2 bg-gray-800 text-white text-sm rounded-lg border border-gray-700 flex items-center justify-between gap-3"
+        />
+
         {/* Frame rate */}
-        <div>
-          <label className="block text-xs text-gray-400 mb-1">Frame Rate</label>
-          <select
-            value={frameRate}
-            onChange={(e) => setFrameRate(parseInt(e.target.value))}
-            className="w-full px-3 py-2 bg-gray-800 text-white text-sm rounded-lg border border-gray-700 focus:outline-none focus:border-blue-500"
-          >
-            <option value={24}>24 fps (Cinema)</option>
-            <option value={30}>30 fps (Standard)</option>
-            <option value={60}>60 fps (Smooth)</option>
-          </select>
-        </div>
+        <CustomSelect
+          id="export-frame-rate"
+          label="Frame Rate"
+          value={frameRate}
+          onChange={(value) => setFrameRate(Number(value))}
+          options={frameRateOptions}
+          labelClassName="block text-xs text-gray-400 mb-1"
+          triggerClassName="w-full px-3 py-2 bg-gray-800 text-white text-sm rounded-lg border border-gray-700 flex items-center justify-between gap-3"
+        />
 
         {/* Quality */}
         <div>
@@ -144,6 +192,23 @@ export function ExportPanel({ videoId }: ExportPanelProps) {
             <span className="text-xs text-gray-500">
               {quality < 18 ? 'High' : quality < 23 ? 'Medium' : 'Low'} ({quality})
             </span>
+          </div>
+          <div className="grid grid-cols-3 gap-2 mb-3">
+            {QUALITY_PRESETS.map((preset) => (
+              <button
+                key={preset.id}
+                type="button"
+                onClick={() => setQuality(preset.crf)}
+                className={`rounded-lg border px-3 py-2 text-left transition-colors ${
+                  quality === preset.crf
+                    ? 'border-emerald-400/50 bg-emerald-500/10 text-white'
+                    : 'border-gray-700 bg-gray-800 text-gray-300 hover:border-gray-500 hover:text-white'
+                }`}
+              >
+                <div className="text-xs font-medium">{preset.label}</div>
+                <div className="text-[11px] text-gray-400 mt-0.5">{preset.description}</div>
+              </button>
+            ))}
           </div>
           <input
             type="range"
@@ -197,10 +262,25 @@ export function ExportPanel({ videoId }: ExportPanelProps) {
         </label>
 
         {/* Estimated file size */}
-        <div className="p-3 bg-gray-800 rounded-lg">
-          <div className="text-xs text-gray-400">Estimated file size</div>
-          <div className="text-lg font-semibold text-white">
-            ~{Math.round(duration * (format === 'mp4' ? 1 : 0.7) * (40 - quality))} MB
+        <div className="p-3 bg-gray-800 rounded-lg space-y-2">
+          <div className="text-xs text-gray-400">Render summary</div>
+          <div className="grid grid-cols-2 gap-3 text-xs text-gray-300">
+            <div>
+              <div className="text-gray-500">Preset</div>
+              <div>{width}×{height}</div>
+            </div>
+            <div>
+              <div className="text-gray-500">Frame rate</div>
+              <div>{frameRate} fps</div>
+            </div>
+            <div>
+              <div className="text-gray-500">Duration</div>
+              <div>{duration.toFixed(1)}s</div>
+            </div>
+            <div>
+              <div className="text-gray-500">Estimated size</div>
+              <div>~{estimatedSize} MB</div>
+            </div>
           </div>
         </div>
 
